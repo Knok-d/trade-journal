@@ -1,0 +1,342 @@
+/* Data-Dense Dashboard, тёмная финансовая палитра (ui-ux-pro-max:
+   Financial Dashboard dark). Шрифты системные: внешних запросов у этой
+   страницы нет вообще — см. CSP сервера. */
+
+:root {
+  --bg: #020617;
+  --panel: #0e1223;
+  --muted: #1a1e2f;
+  --border: #334155;
+  --fg: #f8fafc;
+  --fg-muted: #94a3b8;
+  --pos: #22c55e;
+  --neg: #ef4444;
+  --accent: #3b82f6;
+  --ring: #60a5fa;
+  --warn: #fbbf24;
+
+  --font-ui: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-data: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* density 8/10: плотная сетка 4/8, компактные панели */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+html { color-scheme: dark; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 var(--font-ui);
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--s4);
+  display: grid;
+  gap: var(--s4);
+}
+
+/* ---------- шапка ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s4);
+  flex-wrap: wrap;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: var(--s4) var(--s4) 0;
+}
+
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+
+.brand-sub { color: var(--fg-muted); font-size: 12px; }
+
+.periods { display: flex; gap: var(--s1); }
+
+.periods button {
+  min-height: 36px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg-muted);
+  font: 500 13px var(--font-ui);
+  cursor: pointer;
+  transition: color 150ms, border-color 150ms, background 150ms;
+}
+
+.periods button:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+.periods button[aria-current="true"] {
+  color: var(--fg);
+  background: var(--muted);
+  border-color: var(--accent);
+}
+
+/* ---------- KPI ---------- */
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--s2);
+}
+
+.kpi {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s3);
+}
+
+.kpi.headline { border-color: var(--accent); }
+
+.kpi .label { font-size: 12px; color: var(--fg-muted); }
+
+.kpi .value {
+  font: 600 22px/1.2 var(--font-data);
+  font-variant-numeric: tabular-nums;
+  margin-top: var(--s1);
+}
+
+.kpi .hint { font-size: 11px; color: var(--fg-muted); margin-top: var(--s1); }
+
+.kpi .warn { color: var(--warn); }
+
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+
+/* ---------- панели ---------- */
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--s4);
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--s4);
+  min-width: 0;
+}
+
+.panel h2 { font-size: 14px; margin: 0 0 var(--s3); }
+
+.h-sub { color: var(--fg-muted); font-weight: 400; font-size: 12px; }
+
+/* ---------- гистограмма ---------- */
+
+.histogram { display: grid; gap: var(--s1); font-family: var(--font-data); }
+
+.hist-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 72px;
+  gap: var(--s2);
+  align-items: center;
+  font-size: 12px;
+}
+
+.hist-count.pos { color: var(--pos); }
+
+.hist-range { color: var(--fg-muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+.top-symbol { color: var(--fg); font-weight: 600; }
+
+.top-dir { color: var(--fg-muted); font-size: 10px; text-transform: uppercase; }
+
+.hist-track { background: var(--muted); border-radius: 3px; height: 16px; }
+
+.hist-bar { height: 100%; border-radius: 3px; background: var(--fg-muted); min-width: 2px; }
+
+.hist-bar.pos { background: var(--pos); }
+.hist-bar.neg { background: var(--neg); }
+
+.hist-count { font-variant-numeric: tabular-nums; }
+
+/* ---------- наблюдения ---------- */
+
+.facts { margin: 0; display: grid; gap: var(--s3); font-size: 13px; }
+
+.facts .fact { border-left: 2px solid var(--border); padding-left: var(--s3); }
+
+.facts .fact.warn { border-left-color: var(--warn); }
+
+.facts dt { color: var(--fg-muted); font-size: 12px; }
+
+.facts dd { margin: 2px 0 0; }
+
+/* ---------- таблица ---------- */
+
+.table-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s2);
+}
+
+.pending-toggle {
+  font-size: 13px;
+  color: var(--fg-muted);
+  display: inline-flex;
+  gap: var(--s2);
+  align-items: center;
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.table-wrap { overflow-x: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+th {
+  text-align: left;
+  color: var(--fg-muted);
+  font-weight: 500;
+  font-size: 12px;
+  padding: var(--s2);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+td {
+  padding: var(--s2);
+  border-bottom: 1px solid var(--muted);
+  white-space: nowrap;
+}
+
+td.num, th.num {
+  text-align: right;
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+tr.trade { cursor: pointer; transition: background 150ms; }
+
+tr.trade:hover { background: var(--muted); }
+
+tr.trade:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+
+.dir { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+
+.badge-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  min-height: 28px;
+}
+
+.badge-btn:focus-visible { outline: 2px solid var(--ring); border-radius: 10px; }
+
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px var(--s2);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+}
+
+.badge.intent { border-color: var(--accent); color: var(--ring); }
+
+.badge.noted { border-color: var(--pos); color: var(--pos); }
+
+.badge.liq { border-color: var(--neg); color: var(--neg); }
+
+/* ---------- разбор сделки ---------- */
+
+tr.detail td {
+  background: var(--muted);
+  white-space: normal;
+  padding: var(--s3) var(--s4);
+}
+
+.detail-grid { display: grid; gap: var(--s3); max-width: 720px; }
+
+.detail-meta { font-size: 12px; color: var(--fg-muted); font-family: var(--font-data); }
+
+.intent-box {
+  border-left: 2px solid var(--accent);
+  padding-left: var(--s3);
+  font-size: 13px;
+}
+
+.intent-box .tag { color: var(--ring); font-size: 11px; }
+
+.note-editor { display: grid; gap: var(--s2); }
+
+.note-editor label { font-size: 12px; color: var(--fg-muted); }
+
+.note-editor textarea {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font: 13px/1.5 var(--font-ui);
+  padding: var(--s2) var(--s3);
+  min-height: 72px;
+  resize: vertical;
+}
+
+.note-editor textarea:focus-visible { outline: 2px solid var(--ring); border-color: var(--accent); }
+
+.note-actions { display: flex; gap: var(--s2); align-items: center; }
+
+.note-actions button {
+  min-height: 36px;
+  padding: 0 var(--s4);
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font: 500 13px var(--font-ui);
+  cursor: pointer;
+  transition: opacity 150ms;
+}
+
+.note-actions button:hover { opacity: 0.85; }
+
+.note-actions button:disabled { opacity: 0.5; cursor: default; }
+
+.note-status { font-size: 12px; color: var(--fg-muted); }
+
+.empty {
+  color: var(--fg-muted);
+  text-align: center;
+  padding: var(--s5);
+  font-size: 13px;
+}
+
+.foot {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 var(--s4) var(--s5);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+/* ---------- адаптив и доступность ---------- */
+
+@media (max-width: 900px) {
+  .columns { grid-template-columns: 1fr; }
+}
+
+@media (pointer: coarse) {
+  .periods button, .note-actions button { min-height: 44px; }
+  tr.trade td { padding: var(--s3) var(--s2); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

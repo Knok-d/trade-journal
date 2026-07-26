@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trade Journal — Bybit linear</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>Trade Journal</h1>
+    <span class="brand-sub">Bybit · linear · сверено с closed-pnl</span>
+  </div>
+  <nav class="periods" aria-label="Период">
+    <button type="button" data-days="7">7 дн.</button>
+    <button type="button" data-days="30">30 дн.</button>
+    <button type="button" data-days="90">90 дн.</button>
+    <button type="button" data-days="0" aria-current="true">Всё</button>
+  </nav>
+</header>
+
+<main>
+  <section class="kpis" id="kpis" aria-live="polite"></section>
+
+  <div class="columns">
+    <section class="panel" aria-labelledby="top-h">
+      <h2 id="top-h">Топ прибыльных сделок <span class="h-sub" id="top-sub"></span></h2>
+      <div id="top-trades" class="histogram"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="facts-h">
+      <h2 id="facts-h">Наблюдения</h2>
+      <dl id="facts" class="facts"></dl>
+    </section>
+  </div>
+
+  <section class="panel" aria-labelledby="trades-h">
+    <div class="table-head">
+      <h2 id="trades-h">Сделки <span class="h-sub" id="trades-count"></span></h2>
+      <label class="pending-toggle">
+        <input type="checkbox" id="only-pending"> только без разбора
+      </label>
+    </div>
+    <div class="table-wrap">
+      <table id="trades-table">
+        <thead>
+          <tr>
+            <th scope="col">Закрыта</th>
+            <th scope="col">Символ</th>
+            <th scope="col">Напр.</th>
+            <th scope="col" class="num">Вход</th>
+            <th scope="col" class="num">Выход</th>
+            <th scope="col" class="num">P&amp;L, USDT</th>
+            <th scope="col">Разбор</th>
+          </tr>
+        </thead>
+        <tbody id="trades-body"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  Локальные данные · ключ биржи только на чтение · сервер слушает 127.0.0.1
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
