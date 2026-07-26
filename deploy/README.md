@@ -51,8 +51,9 @@ cp deploy/Caddyfile /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
-База лежит в `/var/lib/trade-journal/journal.db`; путь задаётся переменной
-`HOME` пользователя сервиса — проверить, что процесс видит именно её.
+База лежит в `/var/lib/trade-journal/journal.db`; путь задаёт `TRADE_JOURNAL_DB`
+в юните. Любая команда, запущенная руками, обязана задать ту же переменную —
+без неё путь выводится из `HOME`, а он у сервиса и у `sudo` разный.
 
 ## Первое заполнение данными
 
@@ -62,7 +63,8 @@ python3 -m journal.cli export /tmp/transfer.db --with-journal
 scp /tmp/transfer.db root@СЕРВЕР:/tmp/
 
 # на сервере
-sudo -u tradejournal python3 -m journal.cli import /tmp/transfer.db
+sudo -u tradejournal TRADE_JOURNAL_DB=/var/lib/trade-journal/journal.db \
+     python3 -m journal.cli import /tmp/transfer.db
 rm /tmp/transfer.db
 ```
 

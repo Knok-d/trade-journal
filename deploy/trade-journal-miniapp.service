@@ -1,0 +1,33 @@
+[Unit]
+Description=Trade Journal Mini App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradejournal
+Group=tradejournal
+WorkingDirectory=/opt/trade-journal
+# Токен бота и id владельца. Файл держать 0600 и root:tradejournal —
+# он же единственное, что позволяет проверить подпись Telegram.
+EnvironmentFile=/etc/trade-journal/env
+# Путь к базе задаётся явно. Иначе он выводится из $HOME (= /opt/trade-journal),
+# а туда ProtectSystem=strict писать не даёт — сервис падал бы на первом запросе.
+Environment=TRADE_JOURNAL_DB=/var/lib/trade-journal/journal.db
+ExecStart=/usr/bin/python3 -m journal.cli serve --miniapp --host 127.0.0.1 --port 8321
+Restart=on-failure
+RestartSec=5
+
+# Ключей биржи здесь нет и быть не должно: бэкфилл живёт на маке.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trade-journal
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -7,11 +7,16 @@
 в roundtrips.py, а не в потребителях, иначе их цифры разойдутся между собой.
 """
 
+import os
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
-DB_PATH = Path.home() / ".trade-journal" / "journal.db"
+# Путь задаётся явно, а не только через $HOME: на сервере HOME берётся из passwd
+# и указывает в /opt, который у юнита смонтирован только на чтение, а `sudo -u`
+# при импорте оставляет HOME=/root — база уезжала бы мимо сервиса.
+DB_PATH = Path(os.environ.get("TRADE_JOURNAL_DB")
+               or Path.home() / ".trade-journal" / "journal.db")
 
 SCHEMA = """
 -- Сырые fills. Append-only: не редактируются и не удаляются никогда.

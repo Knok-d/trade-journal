@@ -5,9 +5,12 @@
 чего продукт существует.
 """
 
+import importlib
+import os
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -128,6 +131,34 @@ class SyncTest(unittest.TestCase):
     def test_missing_transfer_file_is_explicit(self):
         with self.assertRaises(FileNotFoundError):
             sync.merge(self.vps, self.root / "нет-такого.db")
+
+
+class DbPathTest(unittest.TestCase):
+    """На сервере путь к базе задаёт юнит, а не $HOME.
+
+    HOME у сервиса указывает в /opt (только чтение у ProtectSystem=strict),
+    а у `sudo -u` при импорте остаётся /root. Без явной переменной база
+    расходилась на два файла, и сервис читал не тот.
+    """
+
+    def _reload(self, **env):
+        with unittest.mock.patch.dict(os.environ, env, clear=False):
+            if "TRADE_JOURNAL_DB" not in env:
+                os.environ.pop("TRADE_JOURNAL_DB", None)
+            return importlib.reload(db).DB_PATH
+
+    def tearDown(self):
+        os.environ.pop("TRADE_JOURNAL_DB", None)
+        importlib.reload(db)
+
+    def test_env_overrides_home(self):
+        self.assertEqual(
+            self._reload(TRADE_JOURNAL_DB="/var/lib/trade-journal/journal.db"),
+            Path("/var/lib/trade-journal/journal.db"))
+
+    def test_falls_back_to_home(self):
+        self.assertEqual(self._reload(),
+                         Path.home() / ".trade-journal" / "journal.db")
 
 
 if __name__ == "__main__":

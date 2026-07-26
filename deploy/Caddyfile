@@ -1,0 +1,25 @@
+# HTTPS для Telegram Mini App. Caddy сам получает и продлевает сертификат
+# Let's Encrypt — покупать сертификат у регистратора не нужно.
+#
+# Требует: A-запись домена на этот сервер и открытый порт 80 (проверка владения).
+
+knokdd.com {
+	encode gzip
+
+	# Приложение слушает только 127.0.0.1 — наружу оно смотрит через Caddy,
+	# который единственный владеет сертификатом.
+	reverse_proxy 127.0.0.1:8321
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/trade-journal.log
+		# История сделок не должна оседать в логах прокси: пишем только ошибки.
+		level ERROR
+	}
+}
