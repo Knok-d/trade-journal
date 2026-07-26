@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trade Journal</title>
+<link rel="stylesheet" href="/miniapp.css">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+<div id="gate" class="gate">Проверяю доступ…</div>
+
+<main id="app" hidden>
+  <nav class="periods" id="periods" aria-label="Период">
+    <button type="button" data-days="7">7 дн.</button>
+    <button type="button" data-days="30" aria-current="true">30 дн.</button>
+    <button type="button" data-days="90">90 дн.</button>
+    <button type="button" data-days="0">Всё</button>
+  </nav>
+
+  <section class="hero" id="hero" aria-live="polite"></section>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="card" id="facts-card">
+    <h2>Наблюдения</h2>
+    <div id="facts"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Топ прибыльных</h2>
+      <span class="sub" id="top-sub"></span>
+    </div>
+    <div id="top"></div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <h2>Сделки</h2>
+      <label class="toggle">
+        <input type="checkbox" id="only-pending"> без разбора
+      </label>
+    </div>
+    <div id="trades"></div>
+    <button type="button" class="more" id="more" hidden>Показать ещё</button>
+  </section>
+
+  <p class="foot">Данные сверены с closed-pnl Bybit посделочно</p>
+</main>
+
+<script src="/miniapp.js"></script>
+</body>
+</html>

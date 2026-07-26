@@ -6,6 +6,7 @@
 import argparse
 import sys
 import time
+from pathlib import Path
 
 from . import bybit, db, journal, reconcile, report, roundtrips
 from .keychain import KeychainError
@@ -134,8 +135,44 @@ def cmd_stats(args) -> int:
 
 
 def cmd_serve(args) -> int:
-    from . import server
-    server.serve(port=args.port)
+    from . import keychain, server
+    if args.miniapp:
+        # Токен и владелец обязательны: без них публичная страница отдавала бы
+        # историю торговли любому, кто узнал адрес.
+        server.serve(
+            port=args.port, miniapp=True, host=args.host,
+            bot_token=keychain.get("telegram-token"),
+            owner_id=int(keychain.get("telegram-chat-id")),
+        )
+    else:
+        server.serve(port=args.port)
+    return 0
+
+
+def cmd_export(args) -> int:
+    from . import sync
+    conn = db.connect()
+    counts = sync.export(conn, Path(args.file), with_journal=args.with_journal)
+    size = Path(args.file).stat().st_size / 1024
+    print(f"Выгружено в {args.file} ({size:.0f} КБ):")
+    for table, count in counts.items():
+        print(f"  {table}: {count}")
+    if not args.with_journal:
+        print("Журнал не включён — заметки живут на сервере."
+              " Для первичного заполнения: --with-journal")
+    return 0
+
+
+def cmd_import(args) -> int:
+    from . import sync
+    conn = db.connect()
+    result = sync.merge(conn, Path(args.file))
+    added = result["added"]
+    print("Влито:", ", ".join(f"{k} +{v}" for k, v in added.items()) or "ничего нового")
+    print(f"Сделок после пересборки: {result['round_trips']}"
+          f" (комиссия от биржи у {result['fees_from_exchange']})")
+    if result["orphan_funding"]:
+        print(f"ВНИМАНИЕ: фандинг без позиции — {result['orphan_funding']}")
     return 0
 
 
@@ -214,11 +251,25 @@ def main() -> int:
     st.add_argument("--days", type=int, default=0, help="0 = за всю историю")
     st.set_defaults(func=cmd_stats)
 
-    srv = sub.add_parser("serve", help="локальный веб-интерфейс (127.0.0.1)")
+    srv = sub.add_parser("serve", help="веб-интерфейс (по умолчанию 127.0.0.1)")
     srv.add_argument("--port", type=int, default=8321)
+    srv.add_argument("--miniapp", action="store_true",
+                     help="режим Telegram Mini App: проверка подписи на каждом вызове")
+    srv.add_argument("--host", default="127.0.0.1",
+                     help="слушать шире 127.0.0.1 только за HTTPS-прокси")
     srv.set_defaults(func=cmd_serve)
 
     sub.add_parser("bot", help="Telegram-бот: журнал с телефона")
+
+    exp = sub.add_parser("export", help="выгрузить сделки для переноса на сервер")
+    exp.add_argument("file")
+    exp.add_argument("--with-journal", action="store_true",
+                     help="включить заметки и намерения (первичное заполнение)")
+    exp.set_defaults(func=cmd_export)
+
+    imp = sub.add_parser("import", help="влить выгрузку, не трогая разборы на сервере")
+    imp.add_argument("file")
+    imp.set_defaults(func=cmd_import)
 
     cov = sub.add_parser("coverage", help="сколько сделок без обоснования")
     cov.add_argument("--days", type=int, default=0, help="0 = за всё время")

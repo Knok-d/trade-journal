@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import db, journal, stats
+from . import db, journal, stats, webauth
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -22,11 +22,22 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/miniapp.css": ("miniapp.css", "text/css; charset=utf-8"),
+    "/miniapp.js": ("miniapp.js", "text/javascript; charset=utf-8"),
 }
 
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
     "connect-src 'self'; img-src 'self'"
+)
+
+# В режиме Mini App приходится пустить один внешний скрипт — SDK Telegram
+# грузится только с telegram.org и даёт разворот на весь экран, нативную
+# кнопку «назад» и тему клиента. Обойтись без него можно (initData лежит в
+# хеше URL), но интерфейс тогда открывается вполовину экрана.
+CSP_MINIAPP = (
+    "default-src 'none'; script-src 'self' https://telegram.org; "
+    "style-src 'self'; connect-src 'self'; img-src 'self'"
 )
 
 
@@ -40,6 +51,12 @@ class Handler(BaseHTTPRequestHandler):
     db_path = db.DB_PATH
     protocol_version = "HTTP/1.1"
 
+    # Режим Mini App: страница доступна публично, поэтому каждый вызов API
+    # обязан предъявить подпись Telegram. Пустой токен = локальный режим.
+    miniapp = False
+    bot_token = ""
+    owner_id = 0
+
     # --- инфраструктура ----------------------------------------------------
 
     def log_message(self, *args):  # тишина в терминале вместо access-лога
@@ -50,9 +67,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", CSP)
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         CSP_MINIAPP if self.miniapp else CSP)
+        if self.miniapp:
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.end_headers()
         self.wfile.write(body)
+
+    def _authorized(self) -> bool:
+        """В режиме Mini App пускает только владельца с валидной подписью."""
+        if not self.miniapp:
+            return True
+        try:
+            webauth.validate(
+                self.headers.get("X-Init-Data", ""), self.bot_token, self.owner_id
+            )
+            return True
+        except webauth.AuthError as exc:
+            self._json({"error": str(exc)}, 401)
+            return False
 
     def _json(self, payload, status: int = 200) -> None:
         body = json.dumps(payload, default=_jsonable, ensure_ascii=False).encode()
@@ -71,20 +105,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = urlparse(self.path).path
-        if route in STATIC:
+        if route == "/" and self.miniapp:
+            self._send(200, (WEB_DIR / "miniapp.html").read_bytes(),
+                       "text/html; charset=utf-8")
+        elif route in STATIC:
             name, content_type = STATIC[route]
             self._send(200, (WEB_DIR / name).read_bytes(), content_type)
         elif route == "/api/summary":
-            self._api_summary()
+            if self._authorized():
+                self._api_summary()
         elif route == "/api/trades":
-            self._api_trades()
+            if self._authorized():
+                self._api_trades()
         else:
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         route = urlparse(self.path).path
         if route == "/api/note":
-            self._api_note()
+            if self._authorized():
+                self._api_note()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -185,12 +225,24 @@ class Handler(BaseHTTPRequestHandler):
         self._json(payload)
 
 
-def serve(port: int = 8321, db_path: Path = db.DB_PATH) -> None:
+def serve(port: int = 8321, db_path: Path = db.DB_PATH, *, miniapp: bool = False,
+          bot_token: str = "", owner_id: int = 0, host: str = "127.0.0.1") -> None:
     Handler.db_path = db_path
-    # 127.0.0.1, не 0.0.0.0: дневник с историей счёта не должен быть виден
-    # даже в локальной сети.
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Дневник: http://127.0.0.1:{port}/  (Ctrl+C — остановить)", flush=True)
+    Handler.miniapp = miniapp
+    Handler.bot_token = bot_token
+    Handler.owner_id = owner_id
+
+    if miniapp and not (bot_token and owner_id):
+        raise ValueError(
+            "режим Mini App без токена и владельца открыл бы историю торговли всем"
+        )
+
+    # По умолчанию 127.0.0.1, а не 0.0.0.0: дневник с историей счёта не должен
+    # быть виден даже в локальной сети. Mini App слушает шире, но за HTTPS-прокси
+    # и с обязательной проверкой подписи на каждом вызове API.
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    where = "Mini App" if miniapp else "Дневник"
+    print(f"{where}: http://{host}:{port}/  (Ctrl+C — остановить)", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

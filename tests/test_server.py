@@ -114,5 +114,91 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 404)
 
 
+class MiniAppAuthTest(unittest.TestCase):
+    """Режим Mini App: страница публична, поэтому API обязан требовать подпись."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.test_webauth import OWNER, TOKEN, make_init_data
+        cls.make_init_data = staticmethod(make_init_data)
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        db_path = Path(cls.tmp.name) / "mini.db"
+        conn = db.connect(db_path)
+        db.save_executions(conn, [
+            fill("m1", "BTCUSDT", "Buy", "100", "1", 10 * HOUR),
+            fill("m2", "BTCUSDT", "Sell", "110", "1", 11 * HOUR),
+        ])
+        roundtrips.rebuild(conn)
+        conn.close()
+
+        server.Handler.db_path = db_path
+        server.Handler.miniapp = True
+        server.Handler.bot_token = TOKEN
+        server.Handler.owner_id = OWNER
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.tmp.cleanup()
+        server.Handler.miniapp = False
+        server.Handler.bot_token = ""
+        server.Handler.owner_id = 0
+
+    def _get(self, path, init_data=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        if init_data is not None:
+            req.add_header("X-Init-Data", init_data)
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            body = e.read()
+            e.close()
+            return e.code, body
+
+    def test_api_without_signature_is_rejected(self):
+        for path in ("/api/summary", "/api/trades"):
+            status, _ = self._get(path)
+            self.assertEqual(status, 401, f"{path} отдался без подписи")
+
+    def test_api_with_garbage_signature_is_rejected(self):
+        status, _ = self._get("/api/summary", "user=%7B%22id%22%3A1%7D&hash=deadbeef")
+        self.assertEqual(status, 401)
+
+    def test_api_with_valid_signature_works(self):
+        status, body = self._get("/api/summary", self.make_init_data())
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["summary"]["n"], 1)
+
+    def test_post_note_requires_signature(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/note",
+            data=json.dumps({"trade_id": "x", "body": "y"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req) as r:
+                self.fail(f"заметка сохранилась без подписи: {r.status}")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 401)
+            e.close()
+
+    def test_page_is_public_but_carries_csp(self):
+        """Саму страницу отдаём всем — данных в ней нет, они за API."""
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/")
+        with urllib.request.urlopen(req) as r:
+            self.assertEqual(r.status, 200)
+            self.assertIn(b"Trade Journal", r.read())
+            self.assertIn("telegram.org", r.headers["Content-Security-Policy"])
+
+    def test_miniapp_without_token_refuses_to_start(self):
+        with self.assertRaises(ValueError):
+            server.serve(port=0, miniapp=True, bot_token="", owner_id=0)
+
+
 if __name__ == "__main__":
     unittest.main()

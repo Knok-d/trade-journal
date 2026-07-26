@@ -1,0 +1,242 @@
+/* Mini App: цвета берутся из темы клиента Telegram, а не задаются жёстко —
+   иначе приложение выглядит инородным на светлой теме и у тех, кто поменял
+   акцент. Свои значения только там, где у Telegram нет аналога (прибыль,
+   убыток) — их приходится держать самим. */
+
+:root {
+  --bg: var(--tg-theme-bg-color, #17212b);
+  --card: var(--tg-theme-secondary-bg-color, #232e3c);
+  --fg: var(--tg-theme-text-color, #f5f5f5);
+  --muted: var(--tg-theme-hint-color, #7d8b99);
+  --link: var(--tg-theme-link-color, #6ab3f3);
+  --btn: var(--tg-theme-button-color, #5288c1);
+  --btn-fg: var(--tg-theme-button-text-color, #ffffff);
+
+  --pos: #4bb34b;
+  --neg: #e64646;
+  --warn: #e9a83a;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px;
+  --radius: 12px;
+
+  --font: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  --font-num: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.45 var(--font);
+  padding: var(--s3) var(--s3) calc(var(--s4) + env(safe-area-inset-bottom));
+}
+
+h2 { font-size: 14px; margin: 0; }
+
+.gate { color: var(--muted); text-align: center; padding: 25vh var(--s4); }
+
+.gate.error { color: var(--neg); }
+
+/* ---------- период ---------- */
+
+.periods {
+  display: grid;
+  grid-auto-flow: column;
+  gap: var(--s1);
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: var(--s1);
+  margin-bottom: var(--s3);
+}
+
+.periods button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--muted);
+  font: 500 13px var(--font);
+  cursor: pointer;
+  transition: background 150ms, color 150ms;
+}
+
+.periods button[aria-current="true"] { background: var(--btn); color: var(--btn-fg); }
+
+/* ---------- герой ---------- */
+
+.hero {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: var(--s4);
+  margin-bottom: var(--s2);
+  text-align: center;
+}
+
+.hero .label { color: var(--muted); font-size: 12px; }
+
+.hero .value {
+  font: 700 32px/1.1 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  margin: var(--s1) 0;
+}
+
+.hero .sub { color: var(--muted); font-size: 12px; }
+
+/* ---------- плитки ---------- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.tile {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: var(--s3);
+}
+
+.tile .label { color: var(--muted); font-size: 11px; }
+
+.tile .value {
+  font: 600 19px/1.2 var(--font-num);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.tile .hint { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+.tile .hint.warn { color: var(--warn); }
+
+.pos { color: var(--pos); }
+.neg { color: var(--neg); }
+
+/* ---------- карточки ---------- */
+
+.card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: var(--s3) var(--s4);
+  margin-bottom: var(--s2);
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s2);
+  margin-bottom: var(--s2);
+}
+
+.sub { color: var(--muted); font-size: 11px; }
+
+.toggle {
+  color: var(--muted);
+  font-size: 12px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  min-height: 32px;
+}
+
+/* ---------- наблюдения ---------- */
+
+.fact { font-size: 13px; padding: var(--s2) 0; border-top: 1px solid var(--bg); }
+
+.fact:first-child { border-top: 0; padding-top: 0; }
+
+.fact .t { color: var(--muted); font-size: 11px; }
+
+.fact.warn .t { color: var(--warn); }
+
+/* ---------- строки топа и сделок ---------- */
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) 0;
+  border-top: 1px solid var(--bg);
+  min-height: 44px;
+}
+
+.row:first-child { border-top: 0; }
+
+.row.tappable { cursor: pointer; }
+
+.row .sym { font-weight: 600; }
+
+.row .meta { color: var(--muted); font-size: 11px; }
+
+.row .grow { flex: 1; min-width: 0; }
+
+.row .num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dir { color: var(--muted); font-size: 11px; }
+
+.bar { height: 4px; border-radius: 2px; background: var(--pos); margin-top: 5px; }
+
+.mark { font-size: 12px; }
+
+/* ---------- разбор ---------- */
+
+.editor { padding: var(--s2) 0 var(--s3); }
+
+.editor textarea {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--fg);
+  font: 14px/1.45 var(--font);
+  padding: var(--s2) var(--s3);
+  min-height: 84px;
+  resize: vertical;
+}
+
+.editor textarea:focus-visible { outline: none; border-color: var(--btn); }
+
+.editor .hint { color: var(--muted); font-size: 11px; margin: var(--s1) 0 var(--s2); }
+
+.editor button {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--btn);
+  color: var(--btn-fg);
+  font: 600 15px var(--font);
+  cursor: pointer;
+}
+
+.editor button:disabled { opacity: 0.5; }
+
+.status { font-size: 12px; color: var(--muted); text-align: center; margin-top: var(--s2); }
+
+.more {
+  width: 100%;
+  min-height: 44px;
+  margin-top: var(--s2);
+  border: 0;
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--link);
+  font: 500 14px var(--font);
+  cursor: pointer;
+}
+
+.empty { color: var(--muted); font-size: 13px; text-align: center; padding: var(--s4) 0; }
+
+.foot { color: var(--muted); font-size: 11px; text-align: center; margin: var(--s4) 0 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
