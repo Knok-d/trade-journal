@@ -98,6 +98,15 @@ CREATE TABLE IF NOT EXISTS trade_close_orders (
 );
 CREATE INDEX IF NOT EXISTS idx_close_order ON trade_close_orders (order_id);
 
+-- Какое сообщение бота про какую сделку. Нужно, чтобы разбор с телефона писался
+-- ответом на сообщение, а не набором trade_id руками: на мобильном это разница
+-- между «сделаю» и «не буду».
+CREATE TABLE IF NOT EXISTS bot_messages (
+    message_id INTEGER PRIMARY KEY,
+    trade_id   TEXT NOT NULL,
+    sent_at    INTEGER NOT NULL
+);
+
 -- PRE-TRADE: намерение, записанное ДО входа.
 --
 -- Отдельная сущность, а не поле сделки: сделки в момент записи ещё не существует

@@ -78,6 +78,7 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._get("/../journal/keychain.py")
         self.assertEqual(ctx.exception.code, 404)
+        ctx.exception.close()
 
     def test_summary_has_honesty_fields(self):
         _, _, body = self._get("/api/summary?days=0")

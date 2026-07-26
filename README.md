@@ -67,6 +67,31 @@ python3 -m journal.cli serve            # http://127.0.0.1:8321
 127.0.0.1, написан на stdlib и не делает ни одного внешнего запроса —
 шрифты системные, CSP `default-src 'none'`.
 
+### Telegram-бот (журнал с телефона)
+
+Разовая настройка: получить токен у [@BotFather](https://t.me/BotFather), узнать свой
+chat_id у [@userinfobot](https://t.me/userinfobot), положить оба в Keychain:
+
+```sh
+security add-generic-password -U -s trade-journal -a telegram-token -w
+security add-generic-password -U -s trade-journal -a telegram-chat-id -w
+```
+
+```sh
+python3 -m journal.cli bot
+```
+
+Команды: `/stats [3d|7d|30d]`, `/trades [период]`, `/pending`, `/help`.
+
+Разбор пишется **ответом** на сообщение из `/pending` - на телефоне это разница
+между «сделаю» и «не буду». Бот отвечает только своему chat_id, чужие сообщения
+игнорирует молча (ответ «доступ запрещён» подтвердил бы, что бот существует),
+ключей биржи не касается и читает только SQLite.
+
+Баланс, депозит и открытые позиции не отдаются ни одной командой - и не потому,
+что так решено, а потому что в базе их нет: хранятся закрытые сделки.
+Помни при этом, что всё отправленное проходит через серверы Telegram.
+
 ### Статистика
 
 ```sh

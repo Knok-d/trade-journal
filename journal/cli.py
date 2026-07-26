@@ -139,6 +139,18 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_bot(_args) -> int:
+    from . import keychain, telegram
+    token = keychain.get("telegram-token")
+    try:
+        chat_id = int(keychain.get("telegram-chat-id"))
+    except ValueError:
+        print("telegram-chat-id в Keychain должен быть числом.", file=sys.stderr)
+        return 6
+    telegram.run(db.connect, token, chat_id)
+    return 0
+
+
 def cmd_pending(args) -> int:
     conn = db.connect()
     rows = journal.unjournaled(conn, limit=args.limit)
@@ -206,6 +218,8 @@ def main() -> int:
     srv.add_argument("--port", type=int, default=8321)
     srv.set_defaults(func=cmd_serve)
 
+    sub.add_parser("bot", help="Telegram-бот: журнал с телефона")
+
     cov = sub.add_parser("coverage", help="сколько сделок без обоснования")
     cov.add_argument("--days", type=int, default=0, help="0 = за всё время")
     cov.set_defaults(func=cmd_coverage)
@@ -218,6 +232,7 @@ def main() -> int:
     handler = {
         "check-key": cmd_check_key,
         "rebuild": cmd_rebuild,
+        "bot": cmd_bot,
     }.get(args.command) or args.func
 
     try:

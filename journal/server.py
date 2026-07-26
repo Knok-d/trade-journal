@@ -190,10 +190,10 @@ def serve(port: int = 8321, db_path: Path = db.DB_PATH) -> None:
     # 127.0.0.1, не 0.0.0.0: дневник с историей счёта не должен быть виден
     # даже в локальной сети.
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Дневник: http://127.0.0.1:{port}/  (Ctrl+C — остановить)")
+    print(f"Дневник: http://127.0.0.1:{port}/  (Ctrl+C — остановить)", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nОстановлено.")
+        print("\nОстановлено.", flush=True)
     finally:
         httpd.server_close()
