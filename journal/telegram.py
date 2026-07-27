@@ -220,9 +220,12 @@ def screen_top(conn, days: int) -> tuple[str, list]:
     ]
     parts = [title, ""] + lines
     if top["share_of_wins"] is not None:
+        # Доля считается отдельной строкой, а не вложенной f-строкой: одинаковые
+        # кавычки внутри f-строки разрешены только с Python 3.12, а на сервере 3.10.
+        share = _b(f"{float(top['share_of_wins']):.0%}")
         parts += ["", (
             f"Эти {len(top['trades'])} из {top['winners_total']} прибыльных дали "
-            f"{_b(f'{float(top['share_of_wins']):.0%}')} всей прибыли."
+            f"{share} всей прибыли."
         )]
     keyboard = _period_keyboard("top", days)
     keyboard.append(_nav_row("top"))
