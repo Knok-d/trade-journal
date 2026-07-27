@@ -13,11 +13,16 @@
 
 import random
 import sqlite3
+import time
 from decimal import Decimal
 
 from .db import dec
 
 DAY_MS = 24 * 60 * 60 * 1000
+
+# Через сколько часов без обновления данные считаются несвежими. Синк ходит
+# раз в полчаса, так что три часа — это уже не «просто спал», а поломка.
+STALE_AFTER_HOURS = 3
 
 # Порог, ниже которого срез не показывается: на меньших ячейках «лучший сетап»
 # находится всегда, потому что ищется в шуме.
@@ -37,6 +42,28 @@ def sample_note(n: int) -> str:
         if n < threshold:
             return note
     return SAMPLE_TIERS[-1][1]
+
+
+def freshness(conn: sqlite3.Connection, now_ms: int | None = None) -> dict:
+    """Когда данные последний раз брали с биржи и насколько это давно.
+
+    Отдельно от «времени последней сделки»: если не торговал два дня, свежих
+    сделок нет, а синк при этом исправен. Молчаливое устаревание — худший
+    вид поломки для дневника, потому что интерфейс выглядит рабочим.
+    """
+    from .db import get_meta
+
+    raw = get_meta(conn, "synced_at")
+    now = now_ms if now_ms is not None else int(time.time() * 1000)
+    if raw is None:
+        return {"synced_at": None, "age_hours": None, "stale": True}
+    synced_at = int(raw)
+    age_hours = (now - synced_at) / 3_600_000
+    return {
+        "synced_at": synced_at,
+        "age_hours": age_hours,
+        "stale": age_hours > STALE_AFTER_HOURS,
+    }
 
 
 def _closed(conn: sqlite3.Connection, days: int = 0) -> list[sqlite3.Row]:

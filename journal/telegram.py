@@ -147,6 +147,14 @@ def screen_stats(conn, days: int) -> tuple[str, list]:
 
     parts = [title, "", _pre("\n".join(block))]
 
+    fresh = stats.freshness(conn)
+    if fresh["stale"]:
+        parts.append(
+            "⚠️ Данные не обновлялись "
+            + (f"{fresh['age_hours']:.0f} ч" if fresh["synced_at"] else "ни разу")
+            + " — синхронизация с биржей не работает."
+        )
+
     if elo < 0 < ehi:
         parts.append(
             f"⚠️ Интервал матожидания {money(elo)}…{money(ehi)} накрывает ноль: "

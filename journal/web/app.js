@@ -64,6 +64,17 @@ function renderKpis(data) {
   const box = document.getElementById("kpis");
   box.replaceChildren();
 
+  const f = data.freshness;
+  if (f && f.stale) {
+    const warn = el("div", "stale-banner", f.synced_at === null
+      ? "Данные ни разу не обновлялись с биржи"
+      : "Данные не обновлялись " + Math.round(f.age_hours) + " ч — синхронизация не работает");
+    box.parentNode.insertBefore(warn, box);
+  } else {
+    const old = document.querySelector(".stale-banner");
+    if (old) old.remove();
+  }
+
   if (!s.n) {
     box.append(el("div", "empty", "Закрытых сделок за период нет."));
     return;

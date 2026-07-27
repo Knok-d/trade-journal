@@ -101,6 +101,52 @@ rm /tmp/transfer.db
 Дальнейшие синхронизации — без `--with-journal`: заметки уже живут на сервере,
 и заливка их не трогает.
 
+## Автосинхронизация (на маке)
+
+Сервер не может обновиться сам: ключи биржи есть только на маке. Поэтому
+расписание живёт там — `LaunchAgent`, а не `LaunchDaemon`: демон стартует до
+входа в систему и до связки ключей не дотянется.
+
+```sh
+PLIST=~/Library/LaunchAgents/com.knokd.trade-journal-sync.plist
+sed -e "s|REPLACE_WITH_PROJECT|$HOME/dev/trade-journal|g" \
+    -e "s|REPLACE_WITH_HOME|$HOME|g" \
+    -e "s|REPLACE_WITH_REMOTE|root@СЕРВЕР|g" \
+    deploy/com.knokd.trade-journal-sync.plist > "$PLIST"
+launchctl load "$PLIST"
+launchctl list | grep trade-journal   # второе поле — код выхода, 0 = успех
+```
+
+Раз в 30 минут: backfill за 7 дней → пересборка → выгрузка → заливка на сервер.
+Перекрытие в 7 дней намеренное — оно закрывает дыру, если мак был выключен.
+Лог: `~/Library/Logs/trade-journal-sync.log`.
+
+Нет сети — скрипт молча выходит с кодом 0: мак в дороге это норма, следующий
+запуск догонит. А вот отказ сервера принять данные завершается ненулевым кодом
+и виден в `launchctl list`.
+
+### Почему в интерфейсе есть отметка свежести
+
+Сломавшийся синк не выглядит поломкой: дневник показывает позавчерашние цифры
+так же уверенно, как сегодняшние. Поэтому момент последней выгрузки едет вместе
+с данными, и все три интерфейса (дашборд, Mini App, бот) показывают
+предупреждение, если данным больше `stats.STALE_AFTER_HOURS` часов.
+
+## Обновление кода на сервере
+
+`sync.sh` переносит **данные, а не код**. После изменений в репозитории:
+
+```sh
+rsync -az --delete --exclude '.git' --exclude '__pycache__' \
+      --exclude '*.pyc' --exclude '*.db' ./ root@СЕРВЕР:/opt/trade-journal/
+ssh root@СЕРВЕР 'chown -R tradejournal:tradejournal /opt/trade-journal
+                 cd /opt/trade-journal && python3 -m unittest discover -s tests -t .
+                 systemctl restart trade-journal-miniapp trade-journal-bot'
+```
+
+Тесты на сервере — не формальность: там Python 3.10 против свежего на маке,
+и синтаксис новее 3.10 туда не доедет.
+
 ## Кнопка в боте
 
 Ставится через API, без похода в BotFather (на маке):

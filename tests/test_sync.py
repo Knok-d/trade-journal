@@ -9,6 +9,7 @@ import importlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -163,3 +164,61 @@ class DbPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshnessTest(unittest.TestCase):
+    """Отметка свежести: сломавшийся синк обязан быть виден.
+
+    Молчаливое устаревание — худший вид поломки для дневника: интерфейс
+    показывает позавчерашние цифры с той же уверенностью, что и сегодняшние.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mac = db.connect(self.root / "mac.db")
+        self.vps = db.connect(self.root / "vps.db")
+
+    def tearDown(self):
+        self.mac.close()
+        self.vps.close()
+        self.tmp.cleanup()
+
+    def test_never_synced_counts_as_stale(self):
+        from journal import stats
+        f = stats.freshness(self.vps)
+        self.assertIsNone(f["synced_at"])
+        self.assertTrue(f["stale"], "база без отметки обязана считаться устаревшей")
+
+    def test_export_stamps_and_merge_carries_it(self):
+        from journal import stats
+        path = self.root / "t.db"
+        sync.export(self.mac, path)
+        sync.merge(self.vps, path)
+
+        f = stats.freshness(self.vps)
+        self.assertIsNotNone(f["synced_at"], "отметка не доехала до сервера")
+        self.assertFalse(f["stale"])
+        self.assertLess(f["age_hours"], 0.1)
+
+    def test_old_stamp_is_stale(self):
+        from journal import stats
+        old = int(time.time() * 1000) - int(stats.STALE_AFTER_HOURS + 1) * 3_600_000
+        db.set_meta(self.vps, "synced_at", old)
+        f = stats.freshness(self.vps)
+        self.assertTrue(f["stale"])
+        self.assertGreater(f["age_hours"], stats.STALE_AFTER_HOURS)
+
+    def test_stamp_refreshes_on_repeat_sync(self):
+        """Повторный синк обновляет отметку, а не оставляет первую."""
+        from journal import stats
+        path = self.root / "t.db"
+        sync.export(self.mac, path)
+        sync.merge(self.vps, path)
+        first = stats.freshness(self.vps)["synced_at"]
+
+        time.sleep(0.01)
+        sync.export(self.mac, path)
+        sync.merge(self.vps, path)
+        second = stats.freshness(self.vps)["synced_at"]
+        self.assertGreater(second, first)

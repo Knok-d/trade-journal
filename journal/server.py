@@ -141,6 +141,7 @@ class Handler(BaseHTTPRequestHandler):
                 "r": {key: value for key, value in stats.r_multiples(conn, days).items()
                       if key != "values"},
                 "coverage": journal.coverage(conn),
+                "freshness": stats.freshness(conn),
                 "sample_note": stats.sample_note(stats.summary(conn, days).get("n", 0)),
             }
         finally:

@@ -240,3 +240,16 @@ h2 { font-size: 14px; margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+/* Баннер устаревших данных. Показывается только когда синк отстал: дневник
+   не должен уверенно показывать позавчерашние цифры как сегодняшние. */
+.stale {
+  background: var(--warn);
+  color: #1a1a1a;
+  border-radius: var(--radius);
+  padding: var(--s2) var(--s3);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: var(--s2);
+  text-align: center;
+}

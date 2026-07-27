@@ -14,9 +14,10 @@
 """
 
 import sqlite3
+import time
 from pathlib import Path
 
-from . import journal, reconcile, roundtrips
+from . import db, journal, reconcile, roundtrips
 
 # Данные биржи: едут с Мака, на сервере только дополняются.
 TRADE_TABLES = ("raw_executions", "exchange_pnl")
@@ -29,7 +30,11 @@ def export(conn: sqlite3.Connection, path: Path, *, with_journal: bool = False) 
     path = Path(path)
     path.unlink(missing_ok=True)
 
-    tables = TRADE_TABLES + (JOURNAL_TABLES if with_journal else ())
+    # Момент выгрузки едет вместе с данными: сервер сам к бирже не ходит и
+    # иначе не знает, насколько он отстал.
+    db.set_meta(conn, "synced_at", int(time.time() * 1000))
+
+    tables = TRADE_TABLES + (JOURNAL_TABLES if with_journal else ()) + ("meta",)
     counts = {}
     conn.execute("ATTACH DATABASE ? AS out", (str(path),))
     try:
@@ -81,6 +86,14 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
             )
             after = conn.execute(f"SELECT COUNT(*) c FROM main.{table}").fetchone()["c"]
             added[table] = after - before
+
+        # Отметка свежести, наоборот, всегда перезаписывается: она про то,
+        # когда данные в последний раз брали с биржи.
+        if "meta" in present:
+            conn.execute(
+                "INSERT INTO main.meta SELECT key, value FROM src.meta WHERE key='synced_at'"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+            )
         conn.commit()
     finally:
         conn.execute("DETACH DATABASE src")

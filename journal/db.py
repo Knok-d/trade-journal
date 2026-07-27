@@ -148,6 +148,15 @@ CREATE TABLE IF NOT EXISTS sync_state (
     synced_from INTEGER,
     synced_to   INTEGER
 );
+
+-- Служебные отметки. Главная — `synced_at`: когда данные последний раз
+-- обновлялись с биржи. Без неё сломавшийся синк выглядит как исправный
+-- дневник с позавчерашними цифрами: интерфейс показывает их так же
+-- уверенно, как свежие.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -201,6 +210,19 @@ def save_exchange_pnl(conn: sqlite3.Connection, rows: list[dict]) -> int:
     )
     conn.commit()
     return cursor.rowcount
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute(
+        "INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+    conn.commit()
+
+
+def get_meta(conn: sqlite3.Connection, key: str, default=None):
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
 
 
 def dec(value) -> Decimal:

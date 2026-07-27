@@ -58,6 +58,16 @@ function renderHero(s, note) {
   hero.append(el("div", "sub", s.n + " сделок · " + note));
 }
 
+function renderFreshness(f) {
+  const box = document.getElementById("freshness");
+  box.replaceChildren();
+  if (!f || !f.stale) { box.hidden = true; return; }
+  box.hidden = false;
+  box.textContent = f.synced_at === null
+    ? "Данные ни разу не обновлялись с биржи"
+    : "Данные не обновлялись " + Math.round(f.age_hours) + " ч — синхронизация не работает";
+}
+
 function tile(label, value, valueClass, hint, warn) {
   const box = el("div", "tile");
   box.append(el("div", "label", label));
@@ -246,6 +256,7 @@ let lastTrades = [];
 
 async function loadSummary() {
   const data = await api("/api/summary?days=" + state.days);
+  renderFreshness(data.freshness);
   renderHero(data.summary, data.sample_note);
   renderTiles(data);
   renderFacts(data);
