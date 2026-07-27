@@ -1,0 +1,31 @@
+[Unit]
+Description=Trade Journal Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradejournal
+Group=tradejournal
+WorkingDirectory=/opt/trade-journal
+EnvironmentFile=/etc/trade-journal/env
+ExecStart=/usr/bin/python3 -m journal.cli bot
+Restart=on-failure
+RestartSec=10
+
+# Бот должен работать РОВНО в одном месте: Telegram отдаёт длинный опрос
+# только одному потребителю, второй получает 409 и они отбирают апдейты
+# друг у друга. Раз база живёт здесь, то и бот здесь — иначе он читал бы
+# другую копию журнала.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/trade-journal
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

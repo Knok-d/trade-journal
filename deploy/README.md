@@ -22,34 +22,64 @@
 ## Установка
 
 ```sh
-# 1. Пользователь без прав и каталоги
-adduser --system --group --home /opt/trade-journal tradejournal
-mkdir -p /var/lib/trade-journal /etc/trade-journal
-chown tradejournal:tradejournal /var/lib/trade-journal
+# 1. Пользователь без прав и каталоги (на сервере)
+adduser --system --group --home /opt/trade-journal --no-create-home tradejournal
+mkdir -p /opt/trade-journal /var/lib/trade-journal /etc/trade-journal
+chown tradejournal:tradejournal /opt/trade-journal /var/lib/trade-journal
+chmod 750 /var/lib/trade-journal && chmod 700 /etc/trade-journal
+```
 
-# 2. Код
-git clone https://github.com/Knok-d/trade-journal /opt/trade-journal
-chown -R tradejournal:tradejournal /opt/trade-journal
+```sh
+# 2. Код — rsync с мака, а не git clone: репозиторий приватный, и деплой-ключ
+#    на сервере был бы ещё одним доступом, который переживает смену пароля
+rsync -az --delete --exclude '.git' --exclude '__pycache__' \
+      --exclude '*.pyc' --exclude '*.db' ./ root@СЕРВЕР:/opt/trade-journal/
+ssh root@СЕРВЕР 'chown -R tradejournal:tradejournal /opt/trade-journal'
+```
 
-# 3. Секреты. Ключей биржи здесь нет — только токен бота и id владельца
-cat > /etc/trade-journal/env <<'EOF'
-TRADE_JOURNAL_TELEGRAM_TOKEN=...
-TRADE_JOURNAL_TELEGRAM_CHAT_ID=...
-EOF
-chmod 600 /etc/trade-journal/env
-chown root:tradejournal /etc/trade-journal/env
+```sh
+# 3. Секреты — прямым каналом Keychain → SSH, чтобы значение не попало
+#    ни в аргументы команды, ни в историю шелла (запускать на маке)
+{
+  printf 'TRADE_JOURNAL_TELEGRAM_TOKEN='
+  security find-generic-password -s trade-journal -a telegram-token -w
+  printf 'TRADE_JOURNAL_TELEGRAM_CHAT_ID=%s\n' \
+    "$(security find-generic-password -s trade-journal -a telegram-chat-id -w)"
+  printf 'TRADE_JOURNAL_DB=/var/lib/trade-journal/journal.db\n'
+} | ssh root@СЕРВЕР 'cat > /etc/trade-journal/env
+                     chown root:tradejournal /etc/trade-journal/env
+                     chmod 640 /etc/trade-journal/env'
+```
 
-# 4. Сервис
-cp deploy/trade-journal-miniapp.service /etc/systemd/system/
+```sh
+# 4. Сервисы: Mini App и бот (на сервере)
+cp /opt/trade-journal/deploy/trade-journal-*.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now trade-journal-miniapp
-systemctl status trade-journal-miniapp
+systemctl enable --now trade-journal-miniapp trade-journal-bot
+```
 
-# 5. HTTPS
-apt install -y caddy
-cp deploy/Caddyfile /etc/caddy/Caddyfile
+> Бот должен работать **ровно в одном месте**: Telegram отдаёт длинный опрос
+> одному потребителю, второй получает 409 и они отбирают апдейты друг у друга.
+> Раз база живёт на сервере, то и бот там — иначе он читал бы другую копию.
+
+```sh
+# 5. HTTPS. В Ubuntu 22.04 Caddy нет в стандартных репозиториях
+apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt \
+  > /etc/apt/sources.list.d/caddy-stable.list
+apt-get update && apt-get install -y caddy
+
+cp /opt/trade-journal/deploy/Caddyfile /etc/caddy/Caddyfile
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl reload caddy
 ```
+
+**Подключать Caddy только когда A-запись уже указывает на сервер.** Проверка
+Let's Encrypt по несуществующей записи проваливается и тратит попытку из лимита
+(5 отказов на домен в час). Убедиться заранее:
+`dig +short ДОМЕН A @8.8.8.8` должен вернуть IP сервера.
 
 База лежит в `/var/lib/trade-journal/journal.db`; путь задаёт `TRADE_JOURNAL_DB`
 в юните. Любая команда, запущенная руками, обязана задать ту же переменную —
@@ -73,7 +103,21 @@ rm /tmp/transfer.db
 
 ## Кнопка в боте
 
-У @BotFather: `/mybots` → бот → Bot Settings → Menu Button → задать URL домена.
+Ставится через API, без похода в BotFather (на маке):
+
+```sh
+python3 - <<'PY'
+import json, urllib.request
+from journal import keychain
+token = keychain.get("telegram-token")
+payload = json.dumps({"menu_button": {
+    "type": "web_app", "text": "Дневник",
+    "web_app": {"url": "https://ДОМЕН/"}}}).encode()
+req = urllib.request.Request(f"https://api.telegram.org/bot{token}/setChatMenuButton",
+                             data=payload, headers={"Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req)))
+PY
+```
 
 ## Проверка после установки
 
