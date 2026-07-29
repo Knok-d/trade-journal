@@ -172,30 +172,73 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 
 .charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: var(--s4);
 }
 
-.chart { margin-top: var(--s2); }
+.chart { margin-top: var(--s2); position: relative; }
 
-.chart svg { width: 100%; height: 150px; display: block; }
+.chart svg { display: block; width: 100%; }
 
-.chart .axis { stroke: var(--border); stroke-width: 1; }
+/* Сетка едва заметна: она нужна, чтобы прикинуть масштаб, а не чтобы её
+   разглядывать. Подписи — тем же приглушённым, что и остальные пояснения. */
+.chart .grid { stroke: var(--border); stroke-width: 1; opacity: 0.35; }
 
-.chart .line { fill: none; stroke-width: 2; }
+.chart .tick {
+  fill: var(--fg-muted);
+  font: 11px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
 
+.chart .zero { stroke: var(--fg-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+
+.chart .line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .chart .line.pos { stroke: var(--pos); }
 .chart .line.neg { stroke: var(--neg); }
 
-/* Заливка под кривой — только намёк на объём, поэтому почти прозрачная:
-   насыщенная спорила бы за внимание с самой линией. */
-.chart .area { stroke: none; opacity: 0.13; }
+/* Заливка под кривой — мягкий градиент в прозрачность, как в референсе:
+   ровная плашка спорила бы за внимание с самой линией. */
+.chart .grad-top.pos { stop-color: var(--pos); stop-opacity: 0.28; }
+.chart .grad-top.neg { stop-color: var(--neg); stop-opacity: 0.24; }
+.chart .grad-bottom.pos,
+.chart .grad-bottom.neg { stop-color: var(--panel); stop-opacity: 0; }
 
-.chart .area.pos { fill: var(--pos); }
-.chart .area.neg { fill: var(--neg); }
+.chart .guide { stroke: var(--fg-muted); stroke-width: 1; stroke-dasharray: 2 3; }
 
-.chart .bar.pos { fill: var(--pos); }
-.chart .bar.neg { fill: var(--neg); }
+.chart .dot { stroke: var(--panel); stroke-width: 2; }
+.chart .dot.pos { fill: var(--pos); }
+.chart .dot.neg { fill: var(--neg); }
+
+/* Столбики приглушены по умолчанию и разгораются под курсором: так выбранный
+   день виден без обводок и подписей поверх графика. */
+.chart .bar { transition: opacity 120ms; }
+.chart .bar.pos { fill: var(--pos); opacity: 0.72; }
+.chart .bar.neg { fill: var(--neg); opacity: 0.72; }
+/* Приглушённые не исчезают: форма остального графика должна читаться,
+   иначе выделение одного дня стирает контекст, ради которого смотрят. */
+.chart .bar.dim { opacity: 0.3; }
+
+.chart svg:hover .bar:not(.dim) { opacity: 1; }
+
+/* Пилюля со значением — как на референсах: тёмная, скруглённая, по центру
+   над точкой. Курсор она не ловит, иначе моргала бы под собственной тенью. */
+.tip {
+  position: absolute;
+  transform: translateX(-50%);
+  padding: var(--s1) var(--s2);
+  border-radius: 999px;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 500 12px var(--font-ui);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+}
+
+.tip.pos { border-color: var(--pos); }
+.tip.neg { border-color: var(--neg); }
 
 /* ---------- выбор периода ---------- */
 

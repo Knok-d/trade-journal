@@ -4,7 +4,7 @@
 "use strict";
 
 const state = { days: 0, from: null, to: null, pendingOnly: false,
-                tags: { rule: [], reason: [] } };
+                series: null, tags: { rule: [], reason: [] } };
 
 /* ---------- утилиты ---------- */
 
@@ -200,11 +200,18 @@ function renderTopTrades(top) {
 
 /* ---------- графики ----------
    Рисуются руками в SVG: ноль зависимостей — принцип проекта, и он же
-   действует на фронте. Штрихи помечены non-scaling-stroke, поэтому картинка
-   тянется по ширине окна, не размазывая линии. */
+   действует на фронте.
+
+   Размер берётся из настоящей ширины контейнера, а не растягивается через
+   preserveAspectRatio="none": при растяжении круги превращаются в овалы,
+   а скругления у столбиков — в наклонные срезы. Отсюда перерисовка по
+   ResizeObserver. */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const W = 600, H = 150, PAD = 6;
+const CHART_H = 168;
+// Сверху с запасом: над самым высоким столбиком должна помещаться пилюля со
+// значением, иначе она вылезает за карточку и обрезается заголовком.
+const PAD = { top: 38, right: 12, bottom: 22, left: 46 };
 
 function svg(tag, attrs) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -212,57 +219,180 @@ function svg(tag, attrs) {
   return node;
 }
 
-function canvas() {
+function chartFrame(box) {
+  const width = Math.max(240, Math.round(box.clientWidth));
   const root = svg("svg", {
-    viewBox: `0 0 ${W} ${H}`,
-    preserveAspectRatio: "none",
+    width, height: CHART_H,
+    viewBox: `0 0 ${width} ${CHART_H}`,
     role: "img",
   });
-  return root;
+  const tip = el("div", "tip");
+  tip.hidden = true;
+  box.replaceChildren(root, tip);
+  return { root, tip, width, height: CHART_H };
 }
 
-function emptyChart(box, text) {
-  box.replaceChildren(el("div", "empty", text));
+function fmtShort(v) {
+  const abs = Math.abs(v);
+  if (abs >= 1000) return (v / 1000).toFixed(abs >= 10000 ? 0 : 1) + "k";
+  return String(Math.round(v));
+}
+
+function fmtDay(ms) {
+  return new Date(ms).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+}
+
+/* Горизонтальные линии сетки с подписями. Четыре штуки: больше превращает
+   график в миллиметровку, меньше — заставляет угадывать масштаб. */
+function grid(root, width, lo, hi, y) {
+  const steps = 4;
+  for (let i = 0; i <= steps; i++) {
+    const value = lo + (hi - lo) * i / steps;
+    root.append(svg("line", {
+      x1: PAD.left, x2: width - PAD.right, y1: y(value), y2: y(value),
+      class: "grid",
+    }));
+    const label = svg("text", {
+      x: PAD.left - 8, y: y(value) + 4, class: "tick", "text-anchor": "end",
+    });
+    label.textContent = fmtShort(value);
+    root.append(label);
+  }
+}
+
+function xLabels(root, width, height, from, to, x) {
+  for (const [at, anchor] of [[from, "start"], [to, "end"]]) {
+    const label = svg("text", {
+      x: x(at), y: height - 6, class: "tick", "text-anchor": anchor,
+    });
+    label.textContent = fmtDay(at);
+    root.append(label);
+  }
+}
+
+/* Монотонная кубическая интерполяция: сглаживает, но не выносит кривую за
+   пределы самих значений. Обычный сплайн нарисовал бы прибыль, которой не
+   было, — на графике денег это недопустимо. */
+function smoothPath(pts) {
+  if (pts.length < 2) return "";
+  const n = pts.length;
+  const dx = [], dy = [], slope = [];
+  for (let i = 0; i < n - 1; i++) {
+    dx.push(pts[i + 1].x - pts[i].x);
+    dy.push(pts[i + 1].y - pts[i].y);
+    slope.push(dy[i] / (dx[i] || 1));
+  }
+  const m = [slope[0]];
+  for (let i = 1; i < n - 1; i++) {
+    m.push(slope[i - 1] * slope[i] <= 0 ? 0 : (slope[i - 1] + slope[i]) / 2);
+  }
+  m.push(slope[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    if (slope[i] === 0) { m[i] = 0; m[i + 1] = 0; continue; }
+    const a = m[i] / slope[i], b = m[i + 1] / slope[i];
+    const h = Math.hypot(a, b);
+    if (h > 3) { m[i] = 3 * a * slope[i] / h; m[i + 1] = 3 * b * slope[i] / h; }
+  }
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < n - 1; i++) {
+    const t = dx[i] / 3;
+    d += ` C ${pts[i].x + t} ${pts[i].y + m[i] * t},` +
+         ` ${pts[i + 1].x - t} ${pts[i + 1].y - m[i + 1] * t},` +
+         ` ${pts[i + 1].x} ${pts[i + 1].y}`;
+  }
+  return d;
+}
+
+function showTip(tip, text, left, top, sign) {
+  tip.textContent = text;
+  tip.className = "tip " + sign;
+  tip.hidden = false;
+  // Пилюля не должна вылезать за пределы карточки, поэтому край подпирается.
+  const half = tip.offsetWidth / 2;
+  const max = tip.parentElement.clientWidth - half;
+  tip.style.left = Math.min(Math.max(left, half), max) + "px";
+  tip.style.top = Math.max(0, top) + "px";
 }
 
 function renderEquity(points) {
   const box = document.getElementById("equity");
   const sub = document.getElementById("equity-sub");
-  if (points.length < 2) {
+  if (!points || points.length < 2) {
     sub.textContent = "";
-    emptyChart(box, "Сделок за период недостаточно для кривой.");
+    box.replaceChildren(el("div", "empty", "Сделок за период недостаточно для кривой."));
     return;
   }
 
+  const { root, tip, width, height } = chartFrame(box);
   const xs = points.map((p) => p.at);
   const ys = points.map((p) => p.cum);
   const x0 = xs[0], x1 = xs[xs.length - 1];
   const lo = Math.min(0, ...ys), hi = Math.max(0, ...ys);
   const span = hi - lo || 1;
-  const px = (t) => PAD + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) * (W - 2 * PAD);
-  const py = (v) => H - PAD - (v - lo) / span * (H - 2 * PAD);
+  const x = (t) => PAD.left + (x1 === x0 ? 0 : (t - x0) / (x1 - x0)) *
+    (width - PAD.left - PAD.right);
+  const y = (v) => height - PAD.bottom - (v - lo) / span * (height - PAD.top - PAD.bottom);
 
-  const root = canvas();
-  // Ноль подписан линией: без него подъём с −900 до −800 выглядит прибылью.
-  root.append(svg("line", {
-    x1: PAD, x2: W - PAD, y1: py(0), y2: py(0),
-    class: "axis", "vector-effect": "non-scaling-stroke",
-  }));
+  grid(root, width, lo, hi, y);
+  xLabels(root, width, height, x0, x1, x);
 
-  const d = points.map((p, i) => (i ? "L" : "M") + px(p.at) + " " + py(p.cum)).join(" ");
   const last = ys[ys.length - 1];
-  root.append(svg("path", {
-    d: d + ` L ${px(x1)} ${py(0)} L ${px(x0)} ${py(0)} Z`,
-    class: "area " + (last >= 0 ? "pos" : "neg"),
-  }));
-  root.append(svg("path", {
-    d, class: "line " + (last >= 0 ? "pos" : "neg"),
-    "vector-effect": "non-scaling-stroke",
-  }));
-  root.setAttribute("aria-label",
-    "Накопленный результат: " + fmtUsd(last) + " USDT за " + points.length + " сделок");
+  const tone = last >= 0 ? "pos" : "neg";
+  const gradientId = "equity-fill";
+  const defs = svg("defs", {});
+  const gradient = svg("linearGradient", {
+    id: gradientId, x1: 0, y1: 0, x2: 0, y2: 1,
+  });
+  gradient.append(svg("stop", { offset: "0%", class: "grad-top " + tone }));
+  gradient.append(svg("stop", { offset: "100%", class: "grad-bottom " + tone }));
+  defs.append(gradient);
+  root.append(defs);
 
-  box.replaceChildren(root);
+  const pts = points.map((p) => ({ x: x(p.at), y: y(p.cum) }));
+  const line = smoothPath(pts);
+  root.append(svg("path", {
+    d: `${line} L ${x(x1)} ${y(lo)} L ${x(x0)} ${y(lo)} Z`,
+    fill: `url(#${gradientId})`, stroke: "none",
+  }));
+  root.append(svg("path", { d: line, class: "line " + tone }));
+
+  // Ноль отдельной линией: подъём с −900 до −800 без него читается прибылью.
+  if (lo < 0 && hi > 0) {
+    root.append(svg("line", {
+      x1: PAD.left, x2: width - PAD.right, y1: y(0), y2: y(0), class: "zero",
+    }));
+  }
+
+  const guide = svg("line", { class: "guide", y1: PAD.top, y2: height - PAD.bottom });
+  const dot = svg("circle", { r: 5, class: "dot " + tone });
+  guide.setAttribute("opacity", 0);
+  dot.setAttribute("opacity", 0);
+  root.append(guide, dot);
+
+  root.addEventListener("pointermove", (event) => {
+    const rect = root.getBoundingClientRect();
+    const at = x0 + (event.clientX - rect.left - PAD.left) /
+      (width - PAD.left - PAD.right) * (x1 - x0);
+    let best = 0;
+    for (let i = 1; i < points.length; i++) {
+      if (Math.abs(points[i].at - at) < Math.abs(points[best].at - at)) best = i;
+    }
+    const p = points[best];
+    guide.setAttribute("x1", x(p.at));
+    guide.setAttribute("x2", x(p.at));
+    guide.setAttribute("opacity", 1);
+    dot.setAttribute("cx", x(p.at));
+    dot.setAttribute("cy", y(p.cum));
+    dot.setAttribute("opacity", 1);
+    showTip(tip, fmtUsd(p.pnl) + "  ·  итог " + fmtUsd(p.cum),
+            x(p.at), y(p.cum) - 34, pnlClass(p.pnl));
+  });
+  root.addEventListener("pointerleave", () => {
+    guide.setAttribute("opacity", 0);
+    dot.setAttribute("opacity", 0);
+    tip.hidden = true;
+  });
+
   sub.textContent = "итог " + fmtUsd(last) + " · просадка " +
     fmtUsd(-maxDrawdown(ys)) + " USDT";
 }
@@ -282,9 +412,9 @@ function maxDrawdown(values) {
 function renderDaily(points) {
   const box = document.getElementById("daily");
   const sub = document.getElementById("daily-sub");
-  if (!points.length) {
+  if (!points || !points.length) {
     sub.textContent = "";
-    emptyChart(box, "Сделок за период нет.");
+    box.replaceChildren(el("div", "empty", "Сделок за период нет."));
     return;
   }
 
@@ -294,34 +424,82 @@ function renderDaily(points) {
   for (const p of points) {
     const d = new Date(p.at);
     const key = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-    byDay.set(key, (byDay.get(key) || 0) + p.pnl);
+    const cell = byDay.get(key) || { sum: 0, n: 0 };
+    cell.sum += p.pnl;
+    cell.n += 1;
+    byDay.set(key, cell);
   }
   const days = [...byDay.entries()].sort((a, b) => a[0] - b[0]);
-  const peak = Math.max(...days.map(([, v]) => Math.abs(v))) || 1;
-  const step = (W - 2 * PAD) / days.length;
-  const mid = H / 2;
 
-  const root = canvas();
-  root.append(svg("line", {
-    x1: PAD, x2: W - PAD, y1: mid, y2: mid,
-    class: "axis", "vector-effect": "non-scaling-stroke",
-  }));
-  days.forEach(([day, value], i) => {
-    const height = Math.abs(value) / peak * (mid - PAD);
-    const width = Math.max(1, step * 0.7);
-    root.append(svg("rect", {
-      x: PAD + i * step + (step - width) / 2,
-      y: value >= 0 ? mid - height : mid,
-      width, height: Math.max(1, height),
-      class: value >= 0 ? "bar pos" : "bar neg",
+  const { root, tip, width, height } = chartFrame(box);
+  const values = days.map(([, c]) => c.sum);
+  const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+  const span = hi - lo || 1;
+  const y = (v) => height - PAD.bottom - (v - lo) / span * (height - PAD.top - PAD.bottom);
+
+  grid(root, width, lo, hi, y);
+  xLabels(root, width, height, days[0][0], days[days.length - 1][0],
+          (t) => PAD.left + (days.findIndex(([d]) => d === t) + 0.5) *
+            ((width - PAD.left - PAD.right) / days.length));
+
+  const step = (width - PAD.left - PAD.right) / days.length;
+  const barWidth = Math.max(4, Math.min(22, step * 0.68));
+  const zero = y(0);
+  const bars = [];
+
+  // Ось нуля: столбики расходятся вверх и вниз от неё, и без линии непонятно,
+  // где кончается прибыльный день и начинается убыточный.
+  if (lo < 0 && hi > 0) {
+    root.append(svg("line", {
+      x1: PAD.left, x2: width - PAD.right, y1: zero, y2: zero, class: "zero",
     }));
-  });
-  root.setAttribute("aria-label", "Результат по дням, " + days.length + " дней");
+  }
 
-  box.replaceChildren(root);
-  const wins = days.filter(([, v]) => v > 0).length;
+  days.forEach(([day, cell], i) => {
+    const value = cell.sum;
+    const top = value >= 0 ? y(value) : zero;
+    const size = Math.max(2, Math.abs(y(value) - zero));
+    const bar = svg("rect", {
+      x: PAD.left + i * step + (step - barWidth) / 2,
+      y: top, width: barWidth, height: size,
+      // Скругление во всю ширину — как в референсе; на низких столбиках
+      // радиус подрезается по высоте, иначе прямоугольник схлопывается в каплю.
+      rx: Math.min(barWidth / 2, size / 2),
+      class: "bar " + (value >= 0 ? "pos" : "neg"),
+    });
+    root.append(bar);
+    bars.push({ bar, day, value, n: cell.n, cx: PAD.left + i * step + step / 2, top });
+  });
+
+  root.addEventListener("pointermove", (event) => {
+    const rect = root.getBoundingClientRect();
+    const i = Math.floor((event.clientX - rect.left - PAD.left) / step);
+    const hit = bars[Math.max(0, Math.min(bars.length - 1, i))];
+    // Остальные дни глушатся, чтобы выбранный читался сразу.
+    for (const b of bars) b.bar.classList.toggle("dim", b !== hit);
+    showTip(tip, fmtDay(hit.day) + ": " + fmtUsd(hit.value) + " · " +
+            hit.n + (hit.n === 1 ? " сделка" : " сдел."),
+            hit.cx, hit.top - 34, pnlClass(hit.value));
+  });
+  root.addEventListener("pointerleave", () => {
+    for (const b of bars) b.bar.classList.remove("dim");
+    tip.hidden = true;
+  });
+
+  const wins = values.filter((v) => v > 0).length;
   sub.textContent = days.length + " дней · в плюс " + wins;
 }
+
+/* Ширина известна только из DOM, поэтому при изменении размера окна графики
+   перерисовываются целиком. Данные лежат в state — второй раз их не просят. */
+function redrawCharts() {
+  if (!state.series) return;
+  renderEquity(state.series);
+  renderDaily(state.series);
+}
+
+const chartsObserver = new ResizeObserver(() => redrawCharts());
+chartsObserver.observe(document.querySelector(".charts"));
 
 /* ---------- открытые позиции ---------- */
 
@@ -652,8 +830,8 @@ function periodQuery() {
 async function loadSummary() {
   const data = await getJSON("/api/summary?" + periodQuery());
   renderOpen(data.open);
-  renderEquity(data.series);
-  renderDaily(data.series);
+  state.series = data.series;
+  redrawCharts();
   renderKpis(data);
   renderTopTrades(data.top_trades);
   renderRules(data);
