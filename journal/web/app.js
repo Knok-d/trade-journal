@@ -384,7 +384,11 @@ function renderEquity(points) {
   }
 
   const guide = svg("line", { class: "guide", y1: PAD.top, y2: height - PAD.bottom });
-  const dot = svg("circle", { r: 5, class: "dot " + tone });
+  // Точка нейтральная и цветом ничего не утверждает: она отмечает, где стоит
+  // курсор. Раньше её красили по итогу всего периода, и над зелёной точкой
+  // могла висеть красная пилюля убыточного дня — один цвет означал сразу две
+  // разные вещи. Знак теперь говорит только пилюля, и только про свой день.
+  const dot = svg("circle", { r: 5, class: "dot" });
   guide.setAttribute("opacity", 0);
   dot.setAttribute("opacity", 0);
   root.append(guide, dot);
