@@ -303,6 +303,25 @@ function smoothPath(pts) {
   return d;
 }
 
+/* Точка на самой отрисованной кривой по координате x.
+
+   Считать её из данных нельзя: линия сглажена, и точка, поставленная по
+   исходному значению, повисла бы рядом с кривой, а не на ней. Путь монотонен
+   по x (время только растёт), поэтому годится двоичный поиск по длине. */
+function pointOnPath(path, targetX) {
+  let lo = 0, hi = path.getTotalLength();
+  for (let i = 0; i < 16; i++) {
+    const mid = (lo + hi) / 2;
+    if (path.getPointAtLength(mid).x < targetX) lo = mid; else hi = mid;
+  }
+  return path.getPointAtLength((lo + hi) / 2);
+}
+
+function startOfDay(ms) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
 function showTip(tip, text, left, top, sign) {
   tip.textContent = text;
   tip.className = "tip " + sign;
@@ -354,7 +373,8 @@ function renderEquity(points) {
     d: `${line} L ${x(x1)} ${y(lo)} L ${x(x0)} ${y(lo)} Z`,
     fill: `url(#${gradientId})`, stroke: "none",
   }));
-  root.append(svg("path", { d: line, class: "line " + tone }));
+  const curve = svg("path", { d: line, class: "line " + tone });
+  root.append(curve);
 
   // Ноль отдельной линией: подъём с −900 до −800 без него читается прибылью.
   if (lo < 0 && hi > 0) {
@@ -369,23 +389,47 @@ function renderEquity(points) {
   dot.setAttribute("opacity", 0);
   root.append(guide, dot);
 
+  // Что произошло в каждый календарный день — чтобы подсказка могла честно
+  // сказать «сделок не было», а не молчать о днях, где кривая просто ровная.
+  const perDay = new Map();
+  for (const p of points) {
+    const key = startOfDay(p.at);
+    const cell = perDay.get(key) || { sum: 0, n: 0 };
+    cell.sum += p.pnl;
+    cell.n += 1;
+    perDay.set(key, cell);
+  }
+
   root.addEventListener("pointermove", (event) => {
     const rect = root.getBoundingClientRect();
-    const at = x0 + (event.clientX - rect.left - PAD.left) /
-      (width - PAD.left - PAD.right) * (x1 - x0);
-    let best = 0;
-    for (let i = 1; i < points.length; i++) {
-      if (Math.abs(points[i].at - at) < Math.abs(points[best].at - at)) best = i;
+    const left = PAD.left, right = width - PAD.right;
+    // Точка едет за курсором по кривой, а не прыгает к ближайшей сделке.
+    // Прыжки и были причиной, по которой до дней без сделок было не добраться:
+    // на длинном ровном участке курсор всё равно утаскивало к соседней сделке.
+    const px = Math.min(Math.max(event.clientX - rect.left, left), right);
+    const at = x0 + (px - left) / (right - left) * (x1 - x0);
+
+    // Накопленный итог на этот момент — по последней сделке не позже него.
+    let cum = 0;
+    for (const p of points) {
+      if (p.at > at) break;
+      cum = p.cum;
     }
-    const p = points[best];
-    guide.setAttribute("x1", x(p.at));
-    guide.setAttribute("x2", x(p.at));
+
+    const day = perDay.get(startOfDay(at));
+    const onCurve = pointOnPath(curve, px);
+    guide.setAttribute("x1", px);
+    guide.setAttribute("x2", px);
     guide.setAttribute("opacity", 1);
-    dot.setAttribute("cx", x(p.at));
-    dot.setAttribute("cy", y(p.cum));
+    dot.setAttribute("cx", px);
+    dot.setAttribute("cy", onCurve.y);
     dot.setAttribute("opacity", 1);
-    showTip(tip, fmtUsd(p.pnl) + "  ·  итог " + fmtUsd(p.cum),
-            x(p.at), y(p.cum) - 34, pnlClass(p.pnl));
+
+    const what = day
+      ? fmtUsd(day.sum) + " за день · " + day.n + (day.n === 1 ? " сделка" : " сдел.")
+      : "сделок не было";
+    showTip(tip, fmtDay(at) + " · " + what + " · итог " + fmtUsd(cum),
+            px, onCurve.y - 34, day ? pnlClass(day.sum) : "");
   });
   root.addEventListener("pointerleave", () => {
     guide.setAttribute("opacity", 0);
