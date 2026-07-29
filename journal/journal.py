@@ -4,6 +4,7 @@
 комментарий, написанный после закрытия, всегда звучит как «я так и думал».
 """
 
+import secrets
 import sqlite3
 import time
 from decimal import Decimal
@@ -23,10 +24,10 @@ def add_intent(conn, symbol, direction, thesis, *, entry_signal=None,
         raise ValueError("Намерение без тезиса бессмысленно: писать нечего — не входи")
 
     cursor = conn.execute(
-        "INSERT INTO intents (symbol, direction, thesis, entry_signal, planned_stop,"
-        " planned_exit, tags, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO intents (uid, symbol, direction, thesis, entry_signal, planned_stop,"
+        " planned_exit, tags, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         (
-            symbol.upper(), direction, thesis.strip(), entry_signal,
+            new_id(), symbol.upper(), direction, thesis.strip(), entry_signal,
             str(planned_stop) if planned_stop is not None else None,
             str(planned_exit) if planned_exit is not None else None,
             tags, now_ms if now_ms is not None else int(time.time() * 1000),
@@ -123,7 +124,7 @@ def coverage(conn: sqlite3.Connection, since_ms: int = 0) -> dict:
     annotated = conn.execute(
         "SELECT COUNT(*) c FROM round_trips rt"
         " WHERE rt.opened_at >= ? AND ("
-        "   rt.trade_id IN (SELECT trade_id FROM notes)"
+        "   rt.trade_id IN (SELECT trade_id FROM notes WHERE body <> '')"
         "   OR rt.trade_id IN (SELECT matched_trade_id FROM intents"
         "                      WHERE matched_trade_id IS NOT NULL))",
         (since_ms,),
@@ -152,6 +153,12 @@ def coverage(conn: sqlite3.Connection, since_ms: int = 0) -> dict:
 
 
 def add_note(conn: sqlite3.Connection, trade_id: str, body: str) -> None:
+    """Пишет разбор. Пустое тело — это стирание, но строка остаётся.
+
+    Удалять нельзя: журнал синхронизируется в обе стороны, и удалённая строка
+    вернулась бы с другой стороны первым же кругом. Поэтому «нет разбора»
+    везде проверяется как `body <> ''`, а не как отсутствие записи.
+    """
     conn.execute(
         "INSERT INTO notes (trade_id, body, updated_at) VALUES (?,?,?)"
         " ON CONFLICT(trade_id) DO UPDATE SET body = excluded.body,"
@@ -165,9 +172,94 @@ def unjournaled(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
     """Закрытые сделки без разбора — ни заметки, ни намерения (решение C)."""
     return conn.execute(
         "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
-        " AND trade_id NOT IN (SELECT trade_id FROM notes)"
+        " AND trade_id NOT IN (SELECT trade_id FROM notes WHERE body <> '')"
         " AND trade_id NOT IN (SELECT matched_trade_id FROM intents"
         "                      WHERE matched_trade_id IS NOT NULL)"
         " ORDER BY closed_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
+
+
+# --- правила торговли ------------------------------------------------------
+#
+# Правила пишет сам трейдер, а нарушения отмечаются при разборе — постфактум,
+# как и всё остальное в продукте (решение C). Смысл не в дисциплине по чеклисту,
+# а в том, чтобы «я нарушил своё правило» стало измеримым: без отметок это
+# ощущение, с отметками — разница в P&L между двумя группами сделок.
+
+
+def new_id() -> str:
+    """Идентификатор, который не столкнётся с выданным на другой машине."""
+    return secrets.token_hex(8)
+
+
+def add_rule(conn: sqlite3.Connection, body: str) -> str:
+    text = body.strip()
+    if not text:
+        raise ValueError("Пустое правило нечего соблюдать")
+    rule_id, now = new_id(), int(time.time() * 1000)
+    conn.execute(
+        "INSERT INTO rules (rule_id, body, active, created_at, updated_at)"
+        " VALUES (?,?,1,?,?)",
+        (rule_id, text, now, now),
+    )
+    conn.commit()
+    return rule_id
+
+
+def edit_rule(conn: sqlite3.Connection, rule_id: str, *, body: str | None = None,
+              active: bool | None = None) -> bool:
+    """Правка текста и архивация. Возвращает False, если правила нет.
+
+    Архивация вместо удаления: на правило ссылаются нарушения уже разобранных
+    сделок, а `DELETE` вдобавок не пережил бы двусторонний синк.
+    """
+    assignments, params = [], []
+    if body is not None:
+        text = body.strip()
+        if not text:
+            raise ValueError("Пустое правило нечего соблюдать")
+        assignments.append("body = ?")
+        params.append(text)
+    if active is not None:
+        assignments.append("active = ?")
+        params.append(1 if active else 0)
+    if not assignments:
+        return False
+
+    assignments.append("updated_at = ?")
+    params.extend([int(time.time() * 1000), rule_id])
+    cursor = conn.execute(
+        f"UPDATE rules SET {', '.join(assignments)} WHERE rule_id = ?", params
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def rules(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[sqlite3.Row]:
+    """Правила в порядке появления. Перестановок нет — порядок и так осмысленный."""
+    query = "SELECT * FROM rules"
+    if not include_archived:
+        query += " WHERE active = 1"
+    return conn.execute(query + " ORDER BY created_at, rule_id").fetchall()
+
+
+def set_violation(conn: sqlite3.Connection, trade_id: str, rule_id: str,
+                  broken: bool) -> None:
+    conn.execute(
+        "INSERT INTO rule_violations (trade_id, rule_id, broken, updated_at)"
+        " VALUES (?,?,?,?) ON CONFLICT(trade_id, rule_id) DO UPDATE SET"
+        " broken = excluded.broken, updated_at = excluded.updated_at",
+        (trade_id, rule_id, 1 if broken else 0, int(time.time() * 1000)),
+    )
+    conn.commit()
+
+
+def violations_by_trade(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Нарушенные правила по сделкам. Снятые (broken=0) не попадают."""
+    result: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT trade_id, rule_id FROM rule_violations WHERE broken = 1"
+    ):
+        result.setdefault(row["trade_id"], []).append(row["rule_id"])
+    return result

@@ -277,3 +277,66 @@ def holding_time(conn: sqlite3.Connection, days: int = 0) -> dict:
         "n_wins": len(win_h),
         "n_losses": len(loss_h),
     }
+
+
+def rule_stats(conn: sqlite3.Connection, days: int = 0,
+               min_n: int = MIN_SLICE_N) -> dict:
+    """Во что нарушение собственных правил обходится в деньгах.
+
+    Считается только по РАЗОБРАННЫМ сделкам — тем, где есть непустая заметка.
+    Галочки правил ставятся при разборе, поэтому у неразобранной сделки
+    нарушений нет не потому, что их не было, а потому, что никто не смотрел.
+    Попав в «чистые», такие сделки задрали бы их результат, и вывод получился
+    бы про разобранность, а не про правила.
+
+    `enough` отвечает на вопрос, можно ли вообще сравнивать: пока хоть одна из
+    двух групп меньше `min_n`, разница между ними — шум. Цифры при этом
+    показываются: скрывать их значило бы врать в другую сторону.
+    """
+    rows = _closed(conn, days)
+    reviewed_ids = {
+        r["trade_id"] for r in
+        conn.execute("SELECT trade_id FROM notes WHERE body <> ''")
+    }
+    broken: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT trade_id, rule_id FROM rule_violations WHERE broken = 1"
+    ):
+        broken.setdefault(row["trade_id"], []).append(row["rule_id"])
+
+    reviewed = [r for r in rows if r["trade_id"] in reviewed_ids]
+    violated = [r for r in reviewed if broken.get(r["trade_id"])]
+    clean = [r for r in reviewed if not broken.get(r["trade_id"])]
+
+    def group(items) -> dict:
+        values = [dec(r["net_pnl"]) for r in items]
+        return {
+            "n": len(values),
+            "total": sum(values) if values else Decimal(0),
+            "avg": (sum(values) / len(values)) if values else None,
+        }
+
+    per_rule = []
+    for rule in conn.execute(
+        "SELECT rule_id, body, active FROM rules ORDER BY created_at, rule_id"
+    ):
+        hits = [r for r in reviewed if rule["rule_id"] in broken.get(r["trade_id"], ())]
+        if not hits and not rule["active"]:
+            continue          # архивное правило без нарушений показывать незачем
+        measured = group(hits)
+        measured.update({
+            "rule_id": rule["rule_id"],
+            "body": rule["body"],
+            "active": bool(rule["active"]),
+        })
+        per_rule.append(measured)
+
+    return {
+        "reviewed": len(reviewed),
+        "of_total": len(rows),
+        "violated": group(violated),
+        "clean": group(clean),
+        "enough": min(len(violated), len(clean)) >= min_n,
+        "min_n": min_n,
+        "rules": per_rule,
+    }

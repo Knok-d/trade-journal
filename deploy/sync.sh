@@ -25,7 +25,8 @@ cd "$PROJECT"
 # Файл переноса — во временном каталоге, с гарантированной уборкой:
 # он содержит всю историю сделок и не должен валяться после падения.
 TRANSFER="$(mktemp -t trade-journal-sync)"
-cleanup() { rm -f "$TRANSFER"; }
+PULLBACK="$(mktemp -t trade-journal-pull)"
+cleanup() { rm -f "$TRANSFER" "$PULLBACK"; }
 trap cleanup EXIT
 
 # Сеть может отсутствовать (мак в дороге) — это не ошибка, а обычное дело.
@@ -35,8 +36,11 @@ if ! ping -c1 -W2000 api.bybit.com >/dev/null 2>&1; then
   exit 0
 fi
 
-log "бэкфилл за $DAYS дн."
-python3 -m journal.cli backfill --days "$DAYS" >/dev/null
+# Инкрементально: круг идёт раз в минуту, и тянуть неделю истории каждый раз
+# незачем. `--days` остаётся верхней границей на случай, если край выкачки
+# потерялся или мак не включали дольше недели.
+log "бэкфилл"
+python3 -m journal.cli backfill --days "$DAYS" --since-last >/dev/null
 
 log "пересборка"
 python3 -m journal.cli rebuild >/dev/null
@@ -57,10 +61,30 @@ if ssh -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" \
      "cd $REMOTE_PROJECT && sudo -u tradejournal TRADE_JOURNAL_DB=$REMOTE_DB \
         python3 -m journal.cli import /tmp/tj-sync.db"; then
   ssh -o BatchMode=yes "$REMOTE" 'rm -f /tmp/tj-sync.db' || true
-  log "готово"
 else
   status=$?
   ssh -o BatchMode=yes "$REMOTE" 'rm -f /tmp/tj-sync.db' || true
   log "ПРОВАЛ: сервер не принял данные (код $status)"
+  exit "$status"
+fi
+
+# Обратный рейс. Разбор пишется и с телефона, поэтому журнал едет назад:
+# при слиянии побеждает более свежая правка, а не сторона.
+#
+# Отдельный файл и --journal-only: тащить обратно семь мегабайт сырых fills
+# ради пары заметок незачем, а отметка свежести с сервера затёрла бы маковскую
+# (на биржу ходит мак, и знает об отставании только он).
+log "журнал с сервера"
+if ssh -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE" \
+     "cd $REMOTE_PROJECT && sudo -u tradejournal TRADE_JOURNAL_DB=$REMOTE_DB \
+        python3 -m journal.cli export /tmp/tj-journal.db --journal-only" >/dev/null; then
+  scp -q -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE:/tmp/tj-journal.db" "$PULLBACK"
+  ssh -o BatchMode=yes "$REMOTE" 'rm -f /tmp/tj-journal.db' || true
+  python3 -m journal.cli import "$PULLBACK"
+  log "готово"
+else
+  status=$?
+  ssh -o BatchMode=yes "$REMOTE" 'rm -f /tmp/tj-journal.db' || true
+  log "ПРОВАЛ: журнал с сервера не забрался (код $status)"
   exit "$status"
 fi

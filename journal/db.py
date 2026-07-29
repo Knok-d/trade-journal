@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS bot_messages (
 -- привязка уже состоялась, а исходный таймстамп остаётся.
 CREATE TABLE IF NOT EXISTS intents (
     intent_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Опознаётся при синхронизации по uid, а не по intent_id: автоинкремент
+    -- свой на каждой машине, и намерения с мака и с сервера столкнулись бы.
+    uid          TEXT,
     symbol       TEXT NOT NULL,
     direction    TEXT NOT NULL,          -- long | short
     thesis       TEXT NOT NULL,          -- почему вхожу
@@ -134,6 +137,9 @@ CREATE TABLE IF NOT EXISTS intents (
 );
 CREATE INDEX IF NOT EXISTS idx_intent_open
     ON intents (symbol, direction, created_at, matched_trade_id);
+-- Уникальный индекс по uid создаётся в _migrate, а не здесь: SCHEMA
+-- выполняется до миграций, и на базе, заведённой раньше этой колонки,
+-- индекс падал бы с «no such column: uid» при каждом подключении.
 
 -- POST-TRADE: разбор после закрытия. Правится свободно - это и есть его роль.
 CREATE TABLE IF NOT EXISTS notes (
@@ -141,6 +147,35 @@ CREATE TABLE IF NOT EXISTS notes (
     body         TEXT NOT NULL,
     updated_at   INTEGER NOT NULL
 );
+
+-- Правила торговли: пишутся руками и живут дольше отдельных сделок.
+--
+-- rule_id случайный, а не автоинкремент: правила заводятся и на маке, и с
+-- телефона, а журнал синхронизируется в обе стороны. Два разных правила,
+-- получивших id=1 на разных машинах, слияние съело бы молча. Та же причина,
+-- по которой trade_id сделан детерминированным.
+CREATE TABLE IF NOT EXISTS rules (
+    rule_id    TEXT PRIMARY KEY,
+    body       TEXT NOT NULL,
+    active     INTEGER NOT NULL DEFAULT 1,   -- 0 = в архиве, строка остаётся
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- Какие правила нарушены в сделке. Отмечается при разборе, постфактум -
+-- как и сам разбор (решение C).
+--
+-- Снятая галочка остаётся строкой с broken=0. Настоящее удаление не пережило
+-- бы двусторонний синк: строка вернулась бы с другой стороны первым же кругом,
+-- и снятое нарушение воскресло бы. По той же причине архивируются правила.
+CREATE TABLE IF NOT EXISTS rule_violations (
+    trade_id   TEXT NOT NULL,
+    rule_id    TEXT NOT NULL,
+    broken     INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (trade_id, rule_id)
+);
+CREATE INDEX IF NOT EXISTS idx_violation_rule ON rule_violations (rule_id, broken);
 
 -- Отметки о выкачанных периодах, чтобы бэкфилл не начинался каждый раз с нуля.
 CREATE TABLE IF NOT EXISTS sync_state (
@@ -164,6 +199,12 @@ def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    # WAL: приложение читает базу, пока фоновый синк её пишет. В обычном режиме
+    # пересборка на секунду блокирует читателей, и дневник ловил бы «database is
+    # locked» ровно в момент обновления данных. Ожидание блокировки — на случай
+    # пересечения двух писателей (синк на маке, бот и Mini App на сервере).
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
     _migrate(conn)
     return conn
@@ -189,6 +230,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE round_trips ADD COLUMN fees_source TEXT NOT NULL DEFAULT 'fills'"
         )
         conn.commit()
+
+    # uid у намерений появился вместе с двусторонней синхронизацией. Старым
+    # записям он выдаётся здесь: без него намерение не уедет на другую сторону.
+    intent_columns = {r["name"] for r in conn.execute("PRAGMA table_info(intents)")}
+    if "uid" not in intent_columns:
+        conn.execute("ALTER TABLE intents ADD COLUMN uid TEXT")
+        conn.execute("UPDATE intents SET uid = lower(hex(randomblob(8)))")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_uid ON intents (uid)")
+    conn.commit()
 
 
 def save_exchange_pnl(conn: sqlite3.Connection, rows: list[dict]) -> int:

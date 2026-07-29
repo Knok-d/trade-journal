@@ -113,6 +113,55 @@ class ServerTest(unittest.TestCase):
         status, _ = self._post("/api/note", {"trade_id": "nope", "body": "x"})
         self.assertEqual(status, 404)
 
+    def test_rule_lifecycle_over_api(self):
+        status, payload = self._post("/api/rule", {"body": "не усредняться в убыток"})
+        self.assertEqual(status, 200)
+        rule_id = payload["rule_id"]
+
+        _, _, body = self._get("/api/rules")
+        self.assertIn(rule_id, [r["rule_id"] for r in json.loads(body)["rules"]])
+
+        self._post("/api/rule", {"rule_id": rule_id, "body": "не усредняться вообще"})
+        self._post("/api/rule", {"rule_id": rule_id, "active": False})
+        _, _, body = self._get("/api/rules")
+        archived = [r for r in json.loads(body)["rules"] if r["rule_id"] == rule_id][0]
+        self.assertEqual(archived["body"], "не усредняться вообще")
+        self.assertFalse(archived["active"])
+
+    def test_empty_rule_is_rejected_with_400(self):
+        status, _ = self._post("/api/rule", {"body": "  "})
+        self.assertEqual(status, 400)
+
+    def test_unknown_rule_edit_is_404(self):
+        status, _ = self._post("/api/rule", {"rule_id": "нет", "body": "x"})
+        self.assertEqual(status, 404)
+
+    def test_violation_appears_on_the_trade_and_can_be_cleared(self):
+        _, payload = self._post("/api/rule", {"body": "не входить против тренда"})
+        rule_id = payload["rule_id"]
+
+        status, _ = self._post(
+            "/api/violation",
+            {"trade_id": self.trade_id, "rule_id": rule_id, "broken": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(self._violations_of(self.trade_id), [rule_id])
+
+        self._post("/api/violation",
+                   {"trade_id": self.trade_id, "rule_id": rule_id, "broken": False})
+        self.assertEqual(self._violations_of(self.trade_id), [])
+
+    def test_violation_for_unknown_rule_is_404(self):
+        status, _ = self._post(
+            "/api/violation",
+            {"trade_id": self.trade_id, "rule_id": "нет-такого", "broken": True})
+        self.assertEqual(status, 404)
+
+    def _violations_of(self, trade_id):
+        _, _, body = self._get("/api/trades?days=0")
+        trade = [t for t in json.loads(body)["trades"]
+                 if t["trade_id"] == trade_id][0]
+        return trade["violations"]
+
 
 class MiniAppAuthTest(unittest.TestCase):
     """Режим Mini App: страница публична, поэтому API обязан требовать подпись."""

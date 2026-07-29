@@ -159,5 +159,80 @@ class JournalTest(unittest.TestCase):
             journal.add_intent(self.conn, "BTCUSDT", "long", "   ")
 
 
+class RulesTest(unittest.TestCase):
+    """Правила и нарушения.
+
+    Главное, что здесь защищается, — ничто не удаляется физически. Журнал
+    ездит в обе стороны, и удалённая строка вернулась бы с другой стороны:
+    архивированное правило снова стало бы активным, снятое нарушение — снова
+    нарушением.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(Path(self.tmp.name) / "test.db")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _trade(self):
+        db.save_executions(self.conn, [
+            fill("r1", "BTCUSDT", "Buy", "100", "1", 10 * HOUR),
+            fill("r2", "BTCUSDT", "Sell", "110", "1", 11 * HOUR),
+        ])
+        roundtrips.rebuild(self.conn)
+        return self.conn.execute(
+            "SELECT trade_id FROM round_trips").fetchone()["trade_id"]
+
+    def test_rule_ids_do_not_collide_across_machines(self):
+        """Автоинкремент дал бы двум разным правилам один id и потерял одно."""
+        other = db.connect(Path(self.tmp.name) / "phone.db")
+        try:
+            mine = journal.add_rule(self.conn, "не входить против тренда")
+            theirs = journal.add_rule(other, "не усредняться в убыток")
+            self.assertNotEqual(mine, theirs)
+        finally:
+            other.close()
+
+    def test_empty_rule_is_rejected(self):
+        with self.assertRaises(ValueError):
+            journal.add_rule(self.conn, "   ")
+
+    def test_archived_rule_leaves_the_list_but_not_the_table(self):
+        rule_id = journal.add_rule(self.conn, "не торговать после трёх убытков")
+        journal.edit_rule(self.conn, rule_id, active=False)
+
+        self.assertEqual(journal.rules(self.conn), [])
+        self.assertEqual(len(journal.rules(self.conn, include_archived=True)), 1)
+
+    def test_edit_reports_unknown_rule(self):
+        self.assertFalse(journal.edit_rule(self.conn, "нет-такого", body="текст"))
+
+    def test_violation_can_be_set_and_cleared(self):
+        trade_id = self._trade()
+        rule_id = journal.add_rule(self.conn, "не усредняться в убыток")
+
+        journal.set_violation(self.conn, trade_id, rule_id, True)
+        self.assertEqual(journal.violations_by_trade(self.conn), {trade_id: [rule_id]})
+
+        journal.set_violation(self.conn, trade_id, rule_id, False)
+        self.assertEqual(journal.violations_by_trade(self.conn), {})
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM rule_violations").fetchone()["c"],
+            1, "снятое нарушение обязано остаться строкой, иначе синк его воскресит")
+
+    def test_cleared_note_is_a_tombstone_not_a_deletion(self):
+        trade_id = self._trade()
+        journal.add_note(self.conn, trade_id, "разобрал")
+        journal.add_note(self.conn, trade_id, "")
+
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM notes").fetchone()["c"], 1)
+        self.assertEqual(journal.coverage(self.conn)["annotated"], 0,
+                         "пустой разбор не должен считаться разбором")
+        self.assertEqual(len(journal.unjournaled(self.conn)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

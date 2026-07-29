@@ -4,7 +4,7 @@
 "use strict";
 
 const tg = window.Telegram && window.Telegram.WebApp;
-const state = { days: 30, pendingOnly: false, limit: 20, initData: "" };
+const state = { days: 30, pendingOnly: false, limit: 20, initData: "", rules: [] };
 
 /* ---------- утилиты ---------- */
 
@@ -104,40 +104,49 @@ function renderTiles(data) {
     zero));
 }
 
-function renderFacts(data) {
-  const box = document.getElementById("facts");
+/* ---------- правила ----------
+   На телефоне правила только читаются и отмечаются нарушениями — заводятся и
+   правятся они на маке. Разбор с телефона и так основной сценарий, а набирать
+   формулировку правила большим пальцем незачем. */
+
+function renderRules(data) {
+  const measured = data.rules;
+  const byId = {};
+  for (const r of measured.rules) byId[r.rule_id] = r;
+
+  document.getElementById("rules-sub").textContent =
+    measured.of_total ? "разобрано " + measured.reviewed + " из " + measured.of_total : "";
+
+  const summary = document.getElementById("rules-summary");
+  summary.replaceChildren();
+  if (state.rules.length && (measured.violated.n || measured.clean.n)) {
+    summary.append(el("div", "rules-cmp",
+      "с нарушением " + measured.violated.n + " — средний " +
+      fmt.usd(measured.violated.avg) + " · без нарушений " + measured.clean.n +
+      " — средний " + fmt.usd(measured.clean.avg)));
+    if (!measured.enough) {
+      summary.append(el("div", "rules-warn",
+        "в группах меньше " + measured.min_n + " сделок — разница пока ничего не доказывает"));
+    }
+  }
+
+  const box = document.getElementById("rules");
   box.replaceChildren();
-  const s = data.summary;
-  if (!s.n) return;
-
-  const add = (title, body, warn) => {
-    const wrap = el("div", "fact" + (warn ? " warn" : ""));
-    wrap.append(el("div", "t", title));
-    wrap.append(el("div", null, body));
-    box.append(wrap);
-  };
-
-  const h = data.holding;
-  if (h.median_win_hours !== null && h.median_loss_hours !== null) {
-    const skew = h.median_loss_hours > h.median_win_hours * 1.5;
-    add("Медиана удержания",
-      "прибыльные " + h.median_win_hours.toFixed(1) + " ч · убыточные " +
-      h.median_loss_hours.toFixed(1) + " ч" + (skew ? " — убытки пересиживаются" : ""),
-      skew);
+  if (!state.rules.length) {
+    box.append(el("div", "hint", "Правила заводятся в дневнике на маке."));
+    return;
   }
-
-  if (!data.r.available) {
-    add("R-multiple", "недоступен: ни у одной сделки нет стопа, записанного до входа",
-      true);
-  }
-
-  add("Издержки", "комиссии " + s.fees.toFixed(2) +
-    " · фандинг " + fmt.usd(s.funding) +
-    "; без них итог был бы " + fmt.usd(s.gross));
-
-  if (s.fees_from_exchange) {
-    add("Комиссия в MNT", "у " + s.fees_from_exchange +
-      " сделок взята из closed-pnl биржи и не проверяется независимо");
+  for (const rule of state.rules) {
+    const measuredRule = byId[rule.rule_id];
+    if (!rule.active && !measuredRule) continue;
+    const row = el("div", "rule" + (rule.active ? "" : " archived"));
+    row.append(el("div", "grow", rule.body));
+    if (measuredRule) {
+      const stat = el("div", "num " + (measuredRule.total < 0 ? "neg" : ""),
+        measuredRule.n ? measuredRule.n + " · " + fmt.usd(measuredRule.total) : "—");
+      row.append(stat);
+    }
+    box.append(row);
   }
 }
 
@@ -175,6 +184,43 @@ function editor(trade, row) {
   area.value = trade.note || "";
   area.placeholder = "Почему заходил, что увидел, что пошло не так";
   wrap.append(area);
+
+  const active = state.rules.filter((r) => r.active);
+  if (active.length) {
+    const box = el("div", "violations");
+    box.append(el("div", "hint", "Какие правила нарушены:"));
+    for (const rule of active) {
+      const label = el("label", "violation");
+      const check = el("input");
+      check.type = "checkbox";
+      check.checked = trade.violations.includes(rule.rule_id);
+      check.addEventListener("change", async () => {
+        check.disabled = true;
+        try {
+          await api("/api/violation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              trade_id: trade.trade_id, rule_id: rule.rule_id, broken: check.checked,
+            }),
+          });
+          trade.violations = check.checked
+            ? trade.violations.concat(rule.rule_id)
+            : trade.violations.filter((id) => id !== rule.rule_id);
+          haptic("success");
+          loadSummary().catch(() => {});
+        } catch (err) {
+          check.checked = !check.checked;   // не притворяемся, что сохранилось
+          haptic("error");
+        } finally {
+          check.disabled = false;
+        }
+      });
+      label.append(check, el("span", null, rule.body));
+      box.append(label);
+    }
+    wrap.append(box);
+  }
 
   if (trade.has_intent) {
     wrap.append(el("div", "hint", "План до входа: " + (trade.thesis || "")));
@@ -259,8 +305,12 @@ async function loadSummary() {
   renderFreshness(data.freshness);
   renderHero(data.summary, data.sample_note);
   renderTiles(data);
-  renderFacts(data);
+  renderRules(data);
   renderTop(data.top_trades);
+}
+
+async function loadRules() {
+  state.rules = (await api("/api/rules")).rules;
 }
 
 async function loadTrades() {
@@ -280,6 +330,8 @@ function fail(message) {
 
 async function loadAll() {
   try {
+    // Правила первыми: по ним рисуются и панель, и галочки в разборе.
+    await loadRules();
     await Promise.all([loadSummary(), loadTrades()]);
   } catch (err) {
     fail("Не удалось загрузить: " + err.message);

@@ -29,12 +29,27 @@ def cmd_check_key(_args) -> int:
     return 0
 
 
+# Насколько заходить назад за уже выкачанный край при инкрементальном заборе.
+# Fill может доехать до API позже соседей, и без перекрытия он остался бы в
+# дыре между окнами навсегда — повторная выкачка идемпотентна, дыра нет.
+OVERLAP_MS = 15 * 60 * 1000
+
+
 def cmd_backfill(args) -> int:
     client = bybit.Bybit()
     client.assert_read_only()      # каждый запуск, а не только при добавлении ключа
 
-    start, end = _period(args.days)
     conn = db.connect()
+    start, end = _period(args.days)
+    if args.since_last:
+        row = conn.execute(
+            "SELECT synced_to FROM sync_state WHERE category = ?", (args.category,)
+        ).fetchone()
+        if row and row["synced_to"]:
+            # Забираем только новое: минутный круг не должен каждый раз тянуть
+            # неделю истории заново.
+            start = max(start, row["synced_to"] - OVERLAP_MS)
+
     total_new = 0
     batch: list[dict] = []
 
@@ -48,13 +63,26 @@ def cmd_backfill(args) -> int:
     if batch:
         total_new += db.save_executions(conn, batch)
 
-    print(f"Выкачано за {args.days} дн.: новых fills {total_new}")
+    window = f"{(end - start) / DAY_MS:.2f} дн." if args.since_last else f"{args.days} дн."
+    print(f"Выкачано за {window}: новых fills {total_new}")
 
     # closed-pnl биржи тянется тем же проходом: он и арбитр для сверки, и
     # единственный источник USDT-комиссии там, где она списана в MNT.
     pnl_rows = list(client.closed_pnl(start, end, category=args.category))
     new_pnl = db.save_exchange_pnl(conn, pnl_rows)
     print(f"Записей closed-pnl биржи: {len(pnl_rows)} (новых {new_pnl})")
+
+    # Край двигается только после успеха обеих выкачек: упади мы посередине,
+    # следующий запуск обязан повторить окно, а не считать его закрытым.
+    conn.execute(
+        "INSERT INTO sync_state (category, synced_from, synced_to) VALUES (?,?,?)"
+        " ON CONFLICT(category) DO UPDATE SET"
+        "   synced_from = MIN(COALESCE(sync_state.synced_from, excluded.synced_from),"
+        "                     excluded.synced_from),"
+        "   synced_to = MAX(COALESCE(sync_state.synced_to, 0), excluded.synced_to)",
+        (args.category, start, end),
+    )
+    conn.commit()
     return 0
 
 
@@ -149,17 +177,20 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_app(args) -> int:
+    from . import app
+    app.run(port=args.port, sync=not args.no_sync)
+    return 0
+
+
 def cmd_export(args) -> int:
     from . import sync
     conn = db.connect()
-    counts = sync.export(conn, Path(args.file), with_journal=args.with_journal)
+    counts = sync.export(conn, Path(args.file), journal_only=args.journal_only)
     size = Path(args.file).stat().st_size / 1024
     print(f"Выгружено в {args.file} ({size:.0f} КБ):")
     for table, count in counts.items():
         print(f"  {table}: {count}")
-    if not args.with_journal:
-        print("Журнал не включён — заметки живут на сервере."
-              " Для первичного заполнения: --with-journal")
     return 0
 
 
@@ -228,6 +259,9 @@ def main() -> int:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--days", type=int, default=90)
         p.add_argument("--category", default="linear")
+        if name == "backfill":
+            p.add_argument("--since-last", action="store_true",
+                           help="только новое с прошлой выкачки (для частых кругов)")
         p.set_defaults(func=handler)
 
     sub.add_parser("rebuild", help="пересобрать сделки и привязать намерения")
@@ -259,15 +293,22 @@ def main() -> int:
                      help="слушать шире 127.0.0.1 только за HTTPS-прокси")
     srv.set_defaults(func=cmd_serve)
 
+    application = sub.add_parser(
+        "app", help="приложение: дневник плюс синхронизация раз в минуту")
+    application.add_argument("--port", type=int, default=8321)
+    application.add_argument("--no-sync", action="store_true",
+                             help="только интерфейс, без обновления данных")
+    application.set_defaults(func=cmd_app)
+
     sub.add_parser("bot", help="Telegram-бот: журнал с телефона")
 
-    exp = sub.add_parser("export", help="выгрузить сделки для переноса на сервер")
+    exp = sub.add_parser("export", help="выгрузить данные для переноса на сервер")
     exp.add_argument("file")
-    exp.add_argument("--with-journal", action="store_true",
-                     help="включить заметки и намерения (первичное заполнение)")
+    exp.add_argument("--journal-only", action="store_true",
+                     help="только журнал — обратный рейс с сервера на мак")
     exp.set_defaults(func=cmd_export)
 
-    imp = sub.add_parser("import", help="влить выгрузку, не трогая разборы на сервере")
+    imp = sub.add_parser("import", help="влить выгрузку; свежая правка побеждает")
     imp.add_argument("file")
     imp.set_defaults(func=cmd_import)
 

@@ -95,35 +95,34 @@ class SyncTest(unittest.TestCase):
         self.assertEqual(second["added"]["raw_executions"], 0)
         self.assertEqual(second["round_trips"], 1)
 
-    def test_journal_not_exported_by_default(self):
-        """Обычная заливка не тащит журнал с Мака — он живёт на сервере."""
+    def test_journal_always_travels(self):
+        """Обычная заливка везёт журнал: отдельного флага для этого нет.
+
+        Флаг был, и ровно там его забывали — заметка с мака тихо не доезжала
+        до телефона, а заметить это можно было только случайно.
+        """
         self._add_trade(self.mac, "t1", "BTCUSDT", 10 * HOUR)
         mac_trade = self.mac.execute("SELECT trade_id FROM round_trips").fetchone()["trade_id"]
         journal.add_note(self.mac, mac_trade, "локальная заметка")
+        journal.add_rule(self.mac, "не усредняться в убыток")
 
         self._transfer()
         self.assertEqual(
-            self.vps.execute("SELECT COUNT(*) c FROM notes").fetchone()["c"], 0)
-
-    def test_initial_seed_carries_journal(self):
-        """Первичное заполнение переносит уже накопленные разборы."""
-        self._add_trade(self.mac, "t1", "BTCUSDT", 10 * HOUR)
-        mac_trade = self.mac.execute("SELECT trade_id FROM round_trips").fetchone()["trade_id"]
-        journal.add_note(self.mac, mac_trade, "перенесённый разбор")
-
-        self._transfer(with_journal=True)
-        note = self.vps.execute("SELECT body FROM notes").fetchone()
-        self.assertEqual(note["body"], "перенесённый разбор")
+            self.vps.execute("SELECT body FROM notes").fetchone()["body"],
+            "локальная заметка")
+        self.assertEqual(
+            self.vps.execute("SELECT COUNT(*) c FROM rules").fetchone()["c"], 1)
 
     def test_server_note_wins_over_uploaded_one(self):
-        """Если разбор есть с обеих сторон, серверный не перезаписывается."""
+        """Если разбор есть с обеих сторон, побеждает более свежий."""
         self._add_trade(self.mac, "t1", "BTCUSDT", 10 * HOUR)
         trade_id = self.mac.execute("SELECT trade_id FROM round_trips").fetchone()["trade_id"]
         journal.add_note(self.mac, trade_id, "старая версия с Мака")
-        self._transfer(with_journal=True)
+        self._transfer()
 
+        time.sleep(0.002)
         journal.add_note(self.vps, trade_id, "свежая версия с телефона")
-        self._transfer(with_journal=True)
+        self._transfer()
 
         self.assertEqual(
             self.vps.execute("SELECT body FROM notes").fetchone()["body"],
@@ -132,6 +131,156 @@ class SyncTest(unittest.TestCase):
     def test_missing_transfer_file_is_explicit(self):
         with self.assertRaises(FileNotFoundError):
             sync.merge(self.vps, self.root / "нет-такого.db")
+
+
+class TwoWayJournalTest(unittest.TestCase):
+    """Журнал ездит в обе стороны: пишут и на маке, и с телефона.
+
+    Проверяется не «чья сторона правее», а «чья правка свежее» — и то, что
+    ничто не воскресает: снятое нарушение, стёртый разбор и убранное правило
+    обязаны пережить круг синхронизации в снятом виде.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.mac = db.connect(self.root / "mac.db")
+        self.vps = db.connect(self.root / "vps.db")
+
+        db.save_executions(self.mac, [
+            fill("a", "BTCUSDT", "Buy", "100", "1", 10 * HOUR),
+            fill("b", "BTCUSDT", "Sell", "90", "1", 11 * HOUR),
+        ])
+        roundtrips.rebuild(self.mac)
+        self.trade_id = self.mac.execute(
+            "SELECT trade_id FROM round_trips").fetchone()["trade_id"]
+        self._push()
+
+    def tearDown(self):
+        self.mac.close()
+        self.vps.close()
+        self.tmp.cleanup()
+
+    def _push(self):
+        """Мак → сервер: сделки плюс журнал. Ровно то, что делает sync.sh."""
+        path = self.root / "push.db"
+        sync.export(self.mac, path)
+        return sync.merge(self.vps, path)
+
+    def _pull(self):
+        """Сервер → мак: только журнал."""
+        path = self.root / "pull.db"
+        sync.export(self.vps, path, journal_only=True)
+        return sync.merge(self.mac, path)
+
+    def test_rule_created_on_mac_reaches_the_server(self):
+        rule_id = journal.add_rule(self.mac, "не усредняться в убыток")
+        self._push()
+        self.assertEqual(
+            self.vps.execute("SELECT body FROM rules WHERE rule_id = ?",
+                             (rule_id,)).fetchone()["body"],
+            "не усредняться в убыток")
+
+    def test_violation_marked_on_phone_reaches_the_mac(self):
+        rule_id = journal.add_rule(self.mac, "не входить против тренда")
+        self._push()
+
+        journal.add_note(self.vps, self.trade_id, "разобрал с телефона")
+        journal.set_violation(self.vps, self.trade_id, rule_id, True)
+        self._pull()
+
+        self.assertEqual(journal.violations_by_trade(self.mac),
+                         {self.trade_id: [rule_id]})
+        self.assertEqual(
+            self.mac.execute("SELECT body FROM notes").fetchone()["body"],
+            "разобрал с телефона")
+
+    def test_fresher_edit_wins_in_both_directions(self):
+        journal.add_note(self.vps, self.trade_id, "версия с телефона")
+        self._pull()
+        time.sleep(0.002)
+        journal.add_note(self.mac, self.trade_id, "правка на маке")
+        self._push()
+        self.assertEqual(
+            self.vps.execute("SELECT body FROM notes").fetchone()["body"],
+            "правка на маке", "свежая маковская правка не доехала")
+
+        time.sleep(0.002)
+        journal.add_note(self.vps, self.trade_id, "снова с телефона")
+        self._pull()
+        self.assertEqual(
+            self.mac.execute("SELECT body FROM notes").fetchone()["body"],
+            "снова с телефона", "свежая правка с телефона не доехала")
+
+    def test_stale_side_does_not_overwrite_fresher_one(self):
+        """Мак заливает сделки, не тронув заметку, написанную позже на телефоне."""
+        journal.add_note(self.mac, self.trade_id, "старое с мака")
+        self._push()
+        time.sleep(0.002)
+        journal.add_note(self.vps, self.trade_id, "новое с телефона")
+
+        self._push()          # мак не знает о правке и везёт свою старую версию
+        self.assertEqual(
+            self.vps.execute("SELECT body FROM notes").fetchone()["body"],
+            "новое с телефона")
+
+    def test_cleared_violation_does_not_come_back(self):
+        rule_id = journal.add_rule(self.mac, "не докупать на проливе")
+        journal.set_violation(self.mac, self.trade_id, rule_id, True)
+        self._push()
+
+        time.sleep(0.002)
+        journal.set_violation(self.vps, self.trade_id, rule_id, False)
+        self._pull()
+        self._push()          # круг целиком: снятое не должно воскреснуть
+
+        self.assertEqual(journal.violations_by_trade(self.mac), {})
+        self.assertEqual(journal.violations_by_trade(self.vps), {})
+
+    def test_cleared_note_does_not_come_back(self):
+        journal.add_note(self.mac, self.trade_id, "было")
+        self._push()
+
+        time.sleep(0.002)
+        journal.add_note(self.mac, self.trade_id, "")
+        self._push()
+        self._pull()
+
+        self.assertEqual(
+            self.mac.execute("SELECT body FROM notes").fetchone()["body"], "")
+        self.assertEqual(journal.coverage(self.mac)["annotated"], 0)
+
+    def test_archived_rule_does_not_come_back(self):
+        rule_id = journal.add_rule(self.mac, "передумал")
+        self._push()
+
+        time.sleep(0.002)
+        journal.edit_rule(self.vps, rule_id, active=False)
+        self._pull()
+        self._push()
+
+        self.assertEqual(journal.rules(self.mac), [])
+        self.assertEqual(journal.rules(self.vps), [])
+
+    def test_intent_travels_once_and_keeps_its_own_id(self):
+        journal.add_intent(self.mac, "BTCUSDT", "long", "пробой уровня")
+        self._push()
+        self._push()
+
+        rows = self.vps.execute("SELECT uid, thesis FROM intents").fetchall()
+        self.assertEqual(len(rows), 1, "намерение задвоилось при повторной заливке")
+        self.assertEqual(rows[0]["thesis"], "пробой уровня")
+        self.assertIsNotNone(rows[0]["uid"])
+
+    def test_pull_does_not_touch_the_freshness_stamp(self):
+        """Сервер к бирже не ходит — его штамп не должен затирать маковский."""
+        from journal import stats
+        self._push()
+        mac_stamp = stats.freshness(self.mac)["synced_at"]
+
+        time.sleep(0.002)
+        self._pull()
+        self.assertEqual(stats.freshness(self.mac)["synced_at"], mac_stamp)
 
 
 class DbPathTest(unittest.TestCase):

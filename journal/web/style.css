@@ -162,17 +162,107 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 
 .hist-count { font-variant-numeric: tabular-nums; }
 
-/* ---------- наблюдения ---------- */
+/* ---------- правила ---------- */
 
-.facts { margin: 0; display: grid; gap: var(--s3); font-size: 13px; }
+.rules-summary { font-size: 13px; margin-bottom: var(--s3); }
 
-.facts .fact { border-left: 2px solid var(--border); padding-left: var(--s3); }
+.rules-cmp { font-variant-numeric: tabular-nums; }
 
-.facts .fact.warn { border-left-color: var(--warn); }
+.rules-warn { color: var(--warn); font-size: 12px; margin-top: var(--s1); }
 
-.facts dt { color: var(--fg-muted); font-size: 12px; }
+.rules { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s2); }
 
-.facts dd { margin: 2px 0 0; }
+.rule {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  border-left: 2px solid var(--border);
+  padding-left: var(--s3);
+}
+
+.rule.archived { opacity: 0.55; }
+
+.rule-text {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  padding: var(--s1) var(--s2);
+}
+
+.rule-text:hover:not(:disabled) { border-color: var(--muted); }
+
+.rule-text:focus { border-color: var(--ring); outline: none; background: var(--muted); }
+
+.rule-stat {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rule-stat.neg { color: var(--neg); }
+
+.rule-archive {
+  background: none;
+  border: none;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: var(--s1) var(--s2);
+}
+
+.rule-archive:hover { color: var(--fg); }
+
+.rule-add { display: flex; gap: var(--s2); margin-top: var(--s3); }
+
+.rule-add input {
+  flex: 1;
+  min-width: 0;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  padding: var(--s2);
+}
+
+.rule-add input:focus { border-color: var(--ring); outline: none; }
+
+.rule-add button {
+  min-height: 36px;
+  padding: 0 var(--s4);
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font: 500 13px var(--font-ui);
+  cursor: pointer;
+}
+
+.rules-hint { color: var(--fg-muted); font-size: 12px; margin: var(--s2) 0 0; }
+
+/* нарушения в раскрытой строке сделки */
+
+.violations { display: grid; gap: var(--s1); }
+
+.violations-title { color: var(--fg-muted); font-size: 12px; }
+
+.violation {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.violation input { margin-top: 3px; accent-color: var(--warn); }
 
 /* ---------- таблица ---------- */
 
@@ -351,4 +441,13 @@ tr.detail td {
   font-weight: 600;
   font-size: 13px;
   margin-bottom: var(--s2);
+}
+
+/* Исправный синк не кричит: это строка состояния, а не тревога. Кричать
+   должно только то, что действительно требует внимания. */
+.stale-banner.ok {
+  background: none;
+  color: var(--fg-muted);
+  font-weight: 400;
+  padding: 0 0 var(--s2);
 }

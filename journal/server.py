@@ -57,6 +57,11 @@ class Handler(BaseHTTPRequestHandler):
     bot_token = ""
     owner_id = 0
 
+    # Состояние фоновой синхронизации, если она живёт в этом же процессе
+    # (режим приложения на маке). None — синка здесь нет, и интерфейс судит
+    # о свежести по отметке в базе, как на сервере.
+    sync_state = None
+
     # --- инфраструктура ----------------------------------------------------
 
     def log_message(self, *args):  # тишина в терминале вместо access-лога
@@ -101,6 +106,18 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return 0
 
+    def _payload(self) -> dict | None:
+        """Тело POST как словарь. None — значит уже ответили 400."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("ожидался объект")
+            return data
+        except (ValueError, json.JSONDecodeError):
+            self._json({"error": "bad request"}, 400)
+            return None
+
     # --- маршруты ------------------------------------------------------------
 
     def do_GET(self):
@@ -117,6 +134,9 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/trades":
             if self._authorized():
                 self._api_trades()
+        elif route == "/api/rules":
+            if self._authorized():
+                self._api_rules()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -125,6 +145,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/note":
             if self._authorized():
                 self._api_note()
+        elif route == "/api/rule":
+            if self._authorized():
+                self._api_rule()
+        elif route == "/api/violation":
+            if self._authorized():
+                self._api_violation()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -142,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
                       if key != "values"},
                 "coverage": journal.coverage(conn),
                 "freshness": stats.freshness(conn),
+                "rules": stats.rule_stats(conn, days),
+                "sync": dict(self.sync_state) if self.sync_state else None,
                 "sample_note": stats.sample_note(stats.summary(conn, days).get("n", 0)),
             }
         finally:
@@ -167,14 +195,16 @@ class Handler(BaseHTTPRequestHandler):
                 "       n.body AS note, i.intent_id, i.thesis, i.planned_stop,"
                 "       i.match_note"
                 " FROM round_trips rt"
-                " LEFT JOIN notes n ON n.trade_id = rt.trade_id"
+                " LEFT JOIN notes n ON n.trade_id = rt.trade_id AND n.body <> ''"
                 " LEFT JOIN intents i ON i.matched_trade_id = rt.trade_id"
                 f" WHERE {where} ORDER BY rt.closed_at DESC",
                 params,
             ).fetchall()
+            broken = journal.violations_by_trade(conn)
             trades = []
             for r in rows:
                 trades.append({
+                    "violations": broken.get(r["trade_id"], []),
                     "trade_id": r["trade_id"],
                     "symbol": r["symbol"],
                     "direction": r["direction"],
@@ -198,12 +228,82 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         self._json({"trades": trades})
 
-    def _api_note(self):
+    def _api_rules(self):
+        conn = db.connect(self.db_path)
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            data = json.loads(self.rfile.read(length))
+            payload = {"rules": [
+                {
+                    "rule_id": r["rule_id"],
+                    "body": r["body"],
+                    "active": bool(r["active"]),
+                    "created_at": r["created_at"],
+                }
+                for r in journal.rules(conn, include_archived=True)
+            ]}
+        finally:
+            conn.close()
+        self._json(payload)
+
+    def _api_rule(self):
+        """Создать правило (без rule_id), поправить текст или сдать в архив."""
+        data = self._payload()
+        if data is None:
+            return
+
+        conn = db.connect(self.db_path)
+        try:
+            try:
+                if data.get("rule_id"):
+                    updated = journal.edit_rule(
+                        conn, data["rule_id"],
+                        body=data.get("body"), active=data.get("active"),
+                    )
+                    if not updated:
+                        self._json({"error": "unknown rule"}, 404)
+                        return
+                    rule_id = data["rule_id"]
+                else:
+                    rule_id = journal.add_rule(conn, data.get("body", ""))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+            payload = {"ok": True, "rule_id": rule_id}
+        finally:
+            conn.close()
+        self._json(payload)
+
+    def _api_violation(self):
+        data = self._payload()
+        if data is None:
+            return
+        trade_id, rule_id = data.get("trade_id"), data.get("rule_id")
+        if not trade_id or not rule_id:
+            self._json({"error": "bad request"}, 400)
+            return
+
+        conn = db.connect(self.db_path)
+        try:
+            known = conn.execute(
+                "SELECT 1 FROM round_trips WHERE trade_id = ?", (trade_id,)
+            ).fetchone() and conn.execute(
+                "SELECT 1 FROM rules WHERE rule_id = ?", (rule_id,)
+            ).fetchone()
+            if not known:
+                self._json({"error": "unknown trade or rule"}, 404)
+                return
+            journal.set_violation(conn, trade_id, rule_id, bool(data.get("broken")))
+            payload = {"ok": True}
+        finally:
+            conn.close()
+        self._json(payload)
+
+    def _api_note(self):
+        data = self._payload()
+        if data is None:
+            return
+        try:
             trade_id, body = data["trade_id"], data.get("body", "")
-        except (ValueError, KeyError, json.JSONDecodeError):
+        except KeyError:
             self._json({"error": "bad request"}, 400)
             return
 
@@ -215,11 +315,10 @@ class Handler(BaseHTTPRequestHandler):
             if not exists:
                 self._json({"error": "unknown trade"}, 404)
                 return
-            if body.strip():
-                journal.add_note(conn, trade_id, body.strip())
-            else:
-                conn.execute("DELETE FROM notes WHERE trade_id = ?", (trade_id,))
-                conn.commit()
+            # Очистка разбора пишет пустое тело, а не удаляет строку: журнал
+            # синхронизируется в обе стороны, и удалённая строка вернулась бы
+            # с другой стороны первым же кругом.
+            journal.add_note(conn, trade_id, body.strip())
             payload = {"ok": True, "coverage": journal.coverage(conn)}
         finally:
             conn.close()

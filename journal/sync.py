@@ -1,16 +1,26 @@
-"""Перенос сделок с Мака на сервер без потери разборов.
+"""Перенос данных между Маком и сервером без потери разборов.
 
-Разделение ролей после решения выносить Mini App на VPS:
+Разделение ролей:
 
-* **Мак** — единственное место, где есть ключи биржи. Делает backfill и
-  отдаёт наружу только данные о сделках.
-* **VPS** — дом журнала. Заметки и намерения пишутся с телефона и живут
-  только здесь; заливка с Мака их не трогает.
+* **Мак** — единственное место, где есть ключи биржи. Ходит на Bybit и
+  отдаёт наружу посчитанные сделки.
+* **VPS** — то же приложение для телефона: Mini App и бот.
 
-Почему слияние безопасно: `raw_executions` и `exchange_pnl` — append-only
-таблицы с первичными ключами от биржи, поэтому `INSERT OR IGNORE`
-идемпотентен. Производные (`round_trips`) пересобираются на месте, а
-`trade_id` детерминирован — привязка заметок переживает пересборку.
+Данные биржи едут в одну сторону, мак → сервер: `raw_executions` и
+`exchange_pnl` — append-only таблицы с первичными ключами от биржи, поэтому
+`INSERT OR IGNORE` идемпотентен. Производные (`round_trips`) пересобираются
+на месте, а `trade_id` детерминирован — привязка заметок переживает пересборку.
+
+**Журнал ездит в обе стороны.** Разбор пишется и на маке, и с телефона,
+поэтому для журнальных таблиц побеждает более свежая запись по `updated_at`,
+а не сторона. Отсюда требование ко всему журналу: ничего не удаляется
+физически. Очищенный разбор — пустое тело, снятое нарушение — `broken=0`,
+убранное правило — `active=0`. Удалённая строка вернулась бы с другой стороны
+первым же кругом, и удаление выглядело бы как призрак.
+
+Цена решения: last-write-wins опирается на согласованные часы мака и сервера.
+Оба под NTP, а одну и ту же заметку не правят с двух устройств одновременно,
+поэтому расхождение в секунды роли не играет.
 """
 
 import sqlite3
@@ -19,22 +29,39 @@ from pathlib import Path
 
 from . import db, journal, reconcile, roundtrips
 
-# Данные биржи: едут с Мака, на сервере только дополняются.
+# Данные биржи: едут только с Мака, на сервере лишь дополняются.
 TRADE_TABLES = ("raw_executions", "exchange_pnl")
-# Журнал: живёт на сервере, с Мака едет только при первичном заполнении.
-JOURNAL_TABLES = ("notes", "intents")
+# Журнал: ездит в обе стороны, побеждает более свежая правка.
+JOURNAL_TABLES = ("notes", "rules", "rule_violations")
+# Намерение правкам не подлежит по замыслу (иммутабельность — вся его ценность),
+# поэтому едет отдельным правилом: добавляется по новому uid и не переписывается.
+IMMUTABLE_JOURNAL_TABLES = ("intents",)
+ALL_JOURNAL_TABLES = JOURNAL_TABLES + IMMUTABLE_JOURNAL_TABLES
 
 
-def export(conn: sqlite3.Connection, path: Path, *, with_journal: bool = False) -> dict:
-    """Складывает данные о сделках в отдельный файл для переноса."""
+def export(conn: sqlite3.Connection, path: Path, *, journal_only: bool = False) -> dict:
+    """Складывает данные в отдельный файл для переноса.
+
+    Журнал едет всегда: он синхронизируется в обе стороны, и отдельный флаг
+    «взять ещё и заметки» был бы ровно тем местом, где его забывают — заметка
+    с мака тихо не доезжала бы до телефона, и заметить это можно было бы только
+    случайно.
+
+    `journal_only` — обратный рейс с сервера на мак: везёт только журнал, без
+    семи мегабайт сырых fills. Отметку свежести при этом не трогает и не
+    отдаёт: она про поход на биржу, а сервер туда не ходит, и его штамп затёр
+    бы честный маковский.
+    """
     path = Path(path)
     path.unlink(missing_ok=True)
 
-    # Момент выгрузки едет вместе с данными: сервер сам к бирже не ходит и
-    # иначе не знает, насколько он отстал.
-    db.set_meta(conn, "synced_at", int(time.time() * 1000))
-
-    tables = TRADE_TABLES + (JOURNAL_TABLES if with_journal else ()) + ("meta",)
+    if journal_only:
+        tables = ALL_JOURNAL_TABLES
+    else:
+        # Момент выгрузки едет вместе с данными: сервер сам к бирже не ходит и
+        # иначе не знает, насколько он отстал.
+        db.set_meta(conn, "synced_at", int(time.time() * 1000))
+        tables = TRADE_TABLES + ALL_JOURNAL_TABLES + ("meta",)
     counts = {}
     conn.execute("ATTACH DATABASE ? AS out", (str(path),))
     try:
@@ -50,15 +77,23 @@ def export(conn: sqlite3.Connection, path: Path, *, with_journal: bool = False) 
             ).fetchone()["c"]
         conn.commit()
     finally:
+        conn.rollback()      # см. комментарий в merge: иначе ошибка маскируется
         conn.execute("DETACH DATABASE out")
     return counts
 
 
-def merge(conn: sqlite3.Connection, path: Path) -> dict:
-    """Вливает файл переноса в базу. Заметки и намерения не затираются.
+def _key_columns(conn: sqlite3.Connection, table: str) -> list[str]:
+    return [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            if row["pk"]]
 
-    Возвращает, сколько строк реально добавилось: ноль по всем таблицам —
-    признак, что залили то же самое ещё раз, а не что перенос сломался.
+
+def merge(conn: sqlite3.Connection, path: Path) -> dict:
+    """Вливает файл переноса в базу.
+
+    Данные биржи добавляются, журнал сливается по «свежее — значит правее».
+    Возвращает, сколько строк добавилось: ноль по всем таблицам — признак,
+    что залили то же самое ещё раз, а не что перенос сломался. Обновления
+    существующих строк в это число не входят.
     """
     path = Path(path)
     if not path.exists():
@@ -75,17 +110,46 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
             if table not in present:
                 continue
             before = conn.execute(f"SELECT COUNT(*) c FROM main.{table}").fetchone()["c"]
-            columns = ", ".join(
-                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
-            )
-            # OR IGNORE, а не OR REPLACE: заметка, написанная на сервере, важнее
-            # той же строки из переноса — иначе разбор с телефона молча пропал бы.
-            conn.execute(
-                f"INSERT OR IGNORE INTO main.{table} ({columns})"
-                f" SELECT {columns} FROM src.{table}"
-            )
+            columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})")]
+            names = ", ".join(columns)
+
+            if table in TRADE_TABLES:
+                # Append-only с ключами от биржи: повтор просто игнорируется.
+                conn.execute(f"INSERT OR IGNORE INTO main.{table} ({names})"
+                             f" SELECT {names} FROM src.{table}")
+            else:
+                # Журнал: выигрывает более свежая правка, откуда бы она ни
+                # пришла. Сторона значения не имеет — разбор пишется и на маке,
+                # и с телефона, и «серверная всегда правее» потеряла бы маковскую.
+                keys = _key_columns(conn, table)
+                updates = ", ".join(f"{c} = excluded.{c}" for c in columns
+                                    if c not in keys)
+                # `WHERE true` обязателен: без него SQLite не понимает, где
+                # кончается SELECT и начинается ON CONFLICT, и падает на «DO».
+                conn.execute(
+                    f"INSERT INTO main.{table} ({names})"
+                    f" SELECT {names} FROM src.{table} WHERE true"
+                    f" ON CONFLICT({', '.join(keys)}) DO UPDATE SET {updates}"
+                    f" WHERE excluded.updated_at > main.{table}.updated_at"
+                )
             after = conn.execute(f"SELECT COUNT(*) c FROM main.{table}").fetchone()["c"]
             added[table] = after - before
+
+        # Намерения: только новые. Правки у них нет по замыслу, а intent_id —
+        # автоинкремент, свой на каждой машине, поэтому сверка идёт по uid.
+        if "intents" in present:
+            before = conn.execute("SELECT COUNT(*) c FROM main.intents").fetchone()["c"]
+            carried = [row["name"] for row in conn.execute("PRAGMA table_info(intents)")
+                       if row["name"] not in ("intent_id", "matched_trade_id",
+                                              "match_note")]
+            names = ", ".join(carried)
+            conn.execute(
+                f"INSERT INTO main.intents ({names}) SELECT {names} FROM src.intents"
+                " WHERE uid IS NOT NULL AND uid NOT IN"
+                " (SELECT uid FROM main.intents WHERE uid IS NOT NULL)"
+            )
+            after = conn.execute("SELECT COUNT(*) c FROM main.intents").fetchone()["c"]
+            added["intents"] = after - before
 
         # Отметка свежести, наоборот, всегда перезаписывается: она про то,
         # когда данные в последний раз брали с биржи.
@@ -96,6 +160,9 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
             )
         conn.commit()
     finally:
+        # Откат перед отсоединением: иначе любая ошибка выше превращается в
+        # «database src is locked» на DETACH и прячет собственную причину.
+        conn.rollback()
         conn.execute("DETACH DATABASE src")
 
     # Производные пересобираются здесь же: без этого сервер отдавал бы старые

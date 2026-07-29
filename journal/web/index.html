@@ -29,9 +29,17 @@
       <div id="top-trades" class="histogram"></div>
     </section>
 
-    <section class="panel" aria-labelledby="facts-h">
-      <h2 id="facts-h">Наблюдения</h2>
-      <dl id="facts" class="facts"></dl>
+    <section class="panel" aria-labelledby="rules-h">
+      <h2 id="rules-h">Правила <span class="h-sub" id="rules-sub"></span></h2>
+      <div id="rules-summary" class="rules-summary"></div>
+      <ul id="rules" class="rules"></ul>
+      <form id="rule-add" class="rule-add">
+        <input type="text" id="rule-input" maxlength="200"
+               placeholder="Своё правило: «не усредняться в убыток»"
+               aria-label="Новое правило">
+        <button type="submit">Добавить</button>
+      </form>
+      <p class="rules-hint" id="rules-hint"></p>
     </section>
   </div>
 

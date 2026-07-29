@@ -126,5 +126,89 @@ class StatsTest(unittest.TestCase):
         self.assertIn("нет", report.render(self.conn).lower())
 
 
+class RuleStatsTest(unittest.TestCase):
+    """Что нарушения правил стоят в деньгах.
+
+    Главная защита здесь — сравнение идёт только по разобранным сделкам.
+    У неразобранной галочки не проставлены не потому, что правила соблюдены,
+    а потому, что её никто не смотрел; в «чистых» она врала бы в свою пользу.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(Path(self.tmp.name) / "test.db")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _trade(self, tag, entry, exit_, at):
+        db.save_executions(self.conn, [
+            fill(f"{tag}a", "BTCUSDT", "Buy", entry, "1", at),
+            fill(f"{tag}b", "BTCUSDT", "Sell", exit_, "1", at + HOUR),
+        ])
+        roundtrips.rebuild(self.conn)
+        return self.conn.execute(
+            "SELECT trade_id FROM round_trips ORDER BY opened_at DESC"
+        ).fetchone()["trade_id"]
+
+    def test_unreviewed_trades_stay_out_of_both_groups(self):
+        good = self._trade("g", "100", "110", 10 * HOUR)     # +10, разобрана, чистая
+        bad = self._trade("b", "100", "80", 20 * HOUR)       # −20, разобрана, нарушение
+        self._trade("u", "100", "200", 30 * HOUR)            # +100, НЕ разобрана
+
+        rule_id = journal.add_rule(self.conn, "не усредняться в убыток")
+        journal.add_note(self.conn, good, "по плану")
+        journal.add_note(self.conn, bad, "полез усредняться")
+        journal.set_violation(self.conn, bad, rule_id, True)
+
+        result = stats.rule_stats(self.conn)
+        self.assertEqual(result["reviewed"], 2)
+        self.assertEqual(result["of_total"], 3)
+        self.assertEqual(result["clean"]["n"], 1,
+                         "неразобранная сделка не должна попадать в чистые")
+        self.assertEqual(result["violated"]["n"], 1)
+        self.assertLess(float(result["violated"]["total"]), 0)
+
+    def test_small_groups_are_marked_as_not_enough(self):
+        trade = self._trade("s", "100", "90", 10 * HOUR)
+        rule_id = journal.add_rule(self.conn, "не входить против тренда")
+        journal.add_note(self.conn, trade, "разобрал")
+        journal.set_violation(self.conn, trade, rule_id, True)
+
+        result = stats.rule_stats(self.conn)
+        self.assertFalse(result["enough"], "на одной сделке выводов быть не может")
+        self.assertEqual(result["min_n"], stats.MIN_SLICE_N)
+        self.assertEqual(result["rules"][0]["n"], 1, "цифра при этом обязана быть видна")
+
+    def test_cleared_violation_stops_counting(self):
+        trade = self._trade("c", "100", "90", 10 * HOUR)
+        rule_id = journal.add_rule(self.conn, "не докупать на проливе")
+        journal.add_note(self.conn, trade, "разобрал")
+        journal.set_violation(self.conn, trade, rule_id, True)
+        journal.set_violation(self.conn, trade, rule_id, False)
+
+        result = stats.rule_stats(self.conn)
+        self.assertEqual(result["violated"]["n"], 0)
+        self.assertEqual(result["clean"]["n"], 1)
+        self.assertEqual(result["rules"][0]["n"], 0)
+
+    def test_archived_rule_keeps_its_history(self):
+        trade = self._trade("a", "100", "90", 10 * HOUR)
+        rule_id = journal.add_rule(self.conn, "старое правило")
+        journal.add_note(self.conn, trade, "разобрал")
+        journal.set_violation(self.conn, trade, rule_id, True)
+        journal.edit_rule(self.conn, rule_id, active=False)
+
+        shown = stats.rule_stats(self.conn)["rules"]
+        self.assertEqual(len(shown), 1, "правило с нарушениями не исчезает из отчёта")
+        self.assertFalse(shown[0]["active"])
+
+    def test_archived_rule_without_violations_disappears(self):
+        journal.edit_rule(
+            self.conn, journal.add_rule(self.conn, "передумал"), active=False)
+        self.assertEqual(stats.rule_stats(self.conn)["rules"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

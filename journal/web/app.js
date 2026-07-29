@@ -3,7 +3,7 @@
 
 "use strict";
 
-const state = { days: 0, pendingOnly: false };
+const state = { days: 0, pendingOnly: false, rules: [] };
 
 /* ---------- утилиты ---------- */
 
@@ -48,6 +48,16 @@ async function getJSON(url) {
   return r.json();
 }
 
+async function postJSON(url, payload) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(String(r.status));
+  return r.json();
+}
+
 /* ---------- KPI ---------- */
 
 function kpi(label, value, opts = {}) {
@@ -59,21 +69,43 @@ function kpi(label, value, opts = {}) {
   return card;
 }
 
+/* В режиме приложения синк живёт в этом же процессе и знает, чем кончился
+   последний круг, — это точнее отметки в базе. Порог «три часа» там был бы
+   вредным: при круге раз в минуту он молчит два с половиной часа поломки,
+   а после сна мака, наоборот, кричит на исправный синк. */
+function freshnessBanner(data) {
+  const sync = data.sync;
+  if (sync) {
+    if (sync.last_error) {
+      return el("div", "stale-banner", "Синхронизация не проходит: " + sync.last_error);
+    }
+    if (sync.last_ok === null) {
+      return el("div", "stale-banner ok", "Первый круг синхронизации…");
+    }
+    const minutes = Math.round((Date.now() - sync.last_ok) / 60000);
+    return el("div", "stale-banner ok",
+      minutes < 2 ? "Данные свежие" : "Обновлено " + minutes + " мин назад");
+  }
+
+  const f = data.freshness;
+  if (!f || !f.stale) return null;
+  return el("div", "stale-banner", f.synced_at === null
+    ? "Данные ни разу не обновлялись с биржи"
+    : "Данные не обновлялись " + Math.round(f.age_hours) + " ч — синхронизация не работает");
+}
+
 function renderKpis(data) {
   const s = data.summary;
   const box = document.getElementById("kpis");
   box.replaceChildren();
 
-  const f = data.freshness;
-  if (f && f.stale) {
-    const warn = el("div", "stale-banner", f.synced_at === null
-      ? "Данные ни разу не обновлялись с биржи"
-      : "Данные не обновлялись " + Math.round(f.age_hours) + " ч — синхронизация не работает");
-    box.parentNode.insertBefore(warn, box);
-  } else {
-    const old = document.querySelector(".stale-banner");
-    if (old) old.remove();
-  }
+  // Старый баннер снимается всегда, а не только когда данные стали свежими:
+  // сводка перерисовывается на каждое сохранение, и баннеры копились стопкой.
+  const old = document.querySelector(".stale-banner");
+  if (old) old.remove();
+
+  const banner = freshnessBanner(data);
+  if (banner) box.parentNode.insertBefore(banner, box);
 
   if (!s.n) {
     box.append(el("div", "empty", "Закрытых сделок за период нет."));
@@ -163,60 +195,89 @@ function renderTopTrades(top) {
   }
 }
 
-/* ---------- наблюдения ---------- */
+/* ---------- правила ---------- */
 
-function fact(title, body, warn) {
-  const wrap = el("div", "fact" + (warn ? " warn" : ""));
-  wrap.append(el("dt", null, title));
-  wrap.append(el("dd", null, body));
-  return wrap;
+async function saveRule(payload) {
+  await postJSON("/api/rule", payload);
+  await loadRules();
+  loadSummary().catch(showError);
 }
 
-function renderFacts(data) {
-  const box = document.getElementById("facts");
+function ruleRow(rule, measured) {
+  const li = el("li", "rule" + (rule.active ? "" : " archived"));
+
+  // Текст правила — сразу поле ввода: правится на месте, без режима
+  // редактирования. Сохраняется по Enter или уходу фокуса.
+  const input = el("input", "rule-text");
+  input.type = "text";
+  input.value = rule.body;
+  input.maxLength = 200;
+  input.disabled = !rule.active;
+  input.setAttribute("aria-label", "Текст правила");
+  input.addEventListener("change", () => {
+    if (!input.value.trim() || input.value === rule.body) {
+      input.value = rule.body;
+      return;
+    }
+    saveRule({ rule_id: rule.rule_id, body: input.value }).catch(showError);
+  });
+
+  const stat = el("span", "rule-stat");
+  if (measured) {
+    stat.textContent = measured.n
+      ? measured.n + " сдел. · " + fmtUsd(measured.total)
+      : "нарушений нет";
+    if (measured.n && measured.total < 0) stat.classList.add("neg");
+  }
+
+  const archive = el("button", "rule-archive", rule.active ? "×" : "↩");
+  archive.type = "button";
+  archive.title = rule.active ? "В архив" : "Вернуть из архива";
+  archive.setAttribute("aria-label", archive.title);
+  archive.addEventListener("click", () => {
+    saveRule({ rule_id: rule.rule_id, active: !rule.active }).catch(showError);
+  });
+
+  li.append(input, stat, archive);
+  return li;
+}
+
+function renderRules(data) {
+  const measured = data.rules;
+  const byId = {};
+  for (const r of measured.rules) byId[r.rule_id] = r;
+
+  const list = document.getElementById("rules");
+  list.replaceChildren();
+  // Архивное правило показывается, только пока за ним числятся нарушения:
+  // иначе список зарастает передуманным.
+  for (const rule of state.rules) {
+    if (rule.active || byId[rule.rule_id]) list.append(ruleRow(rule, byId[rule.rule_id]));
+  }
+
+  document.getElementById("rules-sub").textContent =
+    measured.of_total ? "разобрано " + measured.reviewed + " из " + measured.of_total : "";
+
+  const box = document.getElementById("rules-summary");
   box.replaceChildren();
-  const s = data.summary;
-  if (!s.n) return;
-
-  const h = data.holding;
-  if (h.median_win_hours !== null && h.median_loss_hours !== null) {
-    const skew = h.median_loss_hours > h.median_win_hours * 1.5;
-    box.append(fact(
-      "Медиана удержания",
-      "прибыльные " + h.median_win_hours.toFixed(1) + " ч (n=" + h.n_wins + ") · " +
-      "убыточные " + h.median_loss_hours.toFixed(1) + " ч (n=" + h.n_losses + ")" +
-      (skew ? " — убытки пересиживаются" : ""),
-      skew
-    ));
+  // Пока правил нет, сравнивать нечего: все сделки формально «без нарушений».
+  if (state.rules.length && (measured.violated.n || measured.clean.n)) {
+    box.append(el("div", "rules-cmp",
+      "с нарушением: " + measured.violated.n + " сдел., средний " +
+      fmtUsd(measured.violated.avg) + "  ·  без нарушений: " + measured.clean.n +
+      " сдел., средний " + fmtUsd(measured.clean.avg)));
+    if (!measured.enough) {
+      // Разница между группами на маленькой выборке — шум, и об этом надо
+      // сказать прямо: иначе «правило, которое стоит мне денег» найдётся всегда.
+      box.append(el("div", "rules-warn",
+        "в группах меньше " + measured.min_n +
+        " сделок — разница между ними пока ничего не доказывает"));
+    }
   }
 
-  if (!data.r.available) {
-    box.append(fact(
-      "R-multiple",
-      "недоступен: ни у одной из " + data.r.of_total + " сделок нет стопа, " +
-      "записанного до входа. Появится после intent --stop.",
-      true
-    ));
-  } else {
-    box.append(fact("R-multiple", "посчитан по " + data.r.n + " сделкам"));
-  }
-
-  box.append(fact(
-    "Валовой P&L",
-    fmtUsd(s.gross) + " USDT; издержки изменили итог на " + fmtUsd(-s.costs)
-  ));
-
-  if (s.fees_from_exchange) {
-    box.append(fact(
-      "Комиссия в MNT",
-      "у " + s.fees_from_exchange + " сделок комиссия взята из closed-pnl биржи " +
-      "и не проверяется независимо"
-    ));
-  }
-
-  if (s.liquidated) {
-    box.append(fact("Ликвидации", String(s.liquidated), true));
-  }
+  document.getElementById("rules-hint").textContent = state.rules.length
+    ? "Нарушения отмечаются галочками при разборе сделки."
+    : "Правил пока нет. Напиши те, которым сам себя обязал.";
 }
 
 /* ---------- таблица сделок ---------- */
@@ -243,6 +304,37 @@ function detailRow(t) {
     grid.append(box);
   }
 
+  const active = state.rules.filter((r) => r.active);
+  if (active.length) {
+    const box = el("div", "violations");
+    box.append(el("div", "violations-title", "Какие правила нарушены:"));
+    for (const rule of active) {
+      const label = el("label", "violation");
+      const check = el("input");
+      check.type = "checkbox";
+      check.checked = t.violations.includes(rule.rule_id);
+      check.addEventListener("change", async () => {
+        check.disabled = true;
+        try {
+          await postJSON("/api/violation", {
+            trade_id: t.trade_id, rule_id: rule.rule_id, broken: check.checked,
+          });
+          t.violations = check.checked
+            ? t.violations.concat(rule.rule_id)
+            : t.violations.filter((id) => id !== rule.rule_id);
+          loadSummary().catch(showError);
+        } catch (err) {
+          check.checked = !check.checked;   // не притворяемся, что сохранилось
+        } finally {
+          check.disabled = false;
+        }
+      });
+      label.append(check, el("span", null, rule.body));
+      box.append(label);
+    }
+    grid.append(box);
+  }
+
   const editor = el("div", "note-editor");
   const label = el("label", null, "Почему заходил, что увидел, что пошло не так:");
   label.htmlFor = "note-" + t.trade_id;
@@ -261,13 +353,7 @@ function detailRow(t) {
     save.disabled = true;
     status.textContent = "…";
     try {
-      const r = await fetch("/api/note", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trade_id: t.trade_id, body: area.value }),
-      });
-      if (!r.ok) throw new Error(String(r.status));
-      const payload = await r.json();
+      await postJSON("/api/note", { trade_id: t.trade_id, body: area.value });
       t.note = area.value.trim() || null;
       status.textContent = t.note ? "сохранено" : "очищено";
       // KPI зависят и от summary, поэтому дешевле перечитать сводку целиком,
@@ -361,7 +447,11 @@ async function loadSummary() {
   const data = await getJSON("/api/summary?days=" + state.days);
   renderKpis(data);
   renderTopTrades(data.top_trades);
-  renderFacts(data);
+  renderRules(data);
+}
+
+async function loadRules() {
+  state.rules = (await getJSON("/api/rules")).rules;
 }
 
 async function loadTrades() {
@@ -371,8 +461,11 @@ async function loadTrades() {
 }
 
 function loadAll() {
-  loadSummary().catch(showError);
-  loadTrades().catch(showError);
+  // Правила грузятся первыми: и сводка, и раскрытая строка сделки рисуют
+  // по ним — чекбоксы нарушений и подписи.
+  loadRules()
+    .then(() => Promise.all([loadSummary(), loadTrades()]))
+    .catch(showError);
 }
 
 function showError(err) {
@@ -393,6 +486,13 @@ document.querySelectorAll(".periods button").forEach((btn) => {
 document.getElementById("only-pending").addEventListener("change", (e) => {
   state.pendingOnly = e.target.checked;
   loadTrades().catch(showError);
+});
+
+document.getElementById("rule-add").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("rule-input");
+  if (!input.value.trim()) return;
+  saveRule({ body: input.value }).then(() => { input.value = ""; }).catch(showError);
 });
 
 loadAll();

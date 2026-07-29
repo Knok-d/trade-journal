@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.knokd.trade-journal-app</string>
+
+  <!-- Ключи биржи лежат в Keychain пользователя, поэтому это LaunchAgent
+       (сессия пользователя), а не LaunchDaemon: демон работает до входа в
+       систему и до связки ключей не дотянется. -->
+  <!-- Через bash, а не прямым путём к python3: launchd требует абсолютный путь
+       и не смотрит в PATH, а /usr/bin/python3 на маке — системный 3.9 из
+       Command Line Tools. Он падает уже на разборе `str | None` в bybit.py
+       (синтаксис 3.10+). PATH ниже приводит к нужному python3, и заодно это
+       переживает переезд Homebrew с /opt/homebrew на другой префикс. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>exec python3 -m journal.cli app</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/dmitry/dev/trade-journal</string>
+
+  <!-- Процесс живёт всегда, а расписание синка — обычный sleep внутри него.
+       Прошлый агент работал иначе: StartInterval раз в 30 минут плюс
+       ProcessType=Background. Такую задачу система откладывает, а пропущенный
+       за сон запуск не догоняется — 28.07 данные отстали на 3 ч 45 мин при
+       формально исправном агенте. KeepAlive этой ямы не имеет: заснул мак —
+       поток проснулся вместе с ним. -->
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Не чаще раза в 10 секунд: если приложение падает на старте, перезапуск
+       по кругу не должен съесть батарею. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- В лог попадают только провалы синхронизации, целиком: круг проходит раз
+       в минуту, и удачные оставили бы четырнадцать тысяч строк в сутки. Что
+       синк работает, видно в интерфейсе; лог отвечает на вопрос «почему». -->
+  <key>StandardOutPath</key>
+  <string>/Users/dmitry/Library/Logs/trade-journal-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/dmitry/Library/Logs/trade-journal-sync.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>TRADE_JOURNAL_PROJECT</key>
+    <string>/Users/dmitry/dev/trade-journal</string>
+    <!-- Адрес своего сервера: в репозитории его нет, подставляется при установке -->
+    <key>TRADE_JOURNAL_REMOTE</key>
+    <string>root@example.com</string>
+  </dict>
+</dict>
+</plist>
