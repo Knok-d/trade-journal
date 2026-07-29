@@ -12,15 +12,55 @@
     <h1>Trade Journal</h1>
     <span class="brand-sub">Bybit · linear · сверено с closed-pnl</span>
   </div>
-  <nav class="periods" aria-label="Период">
-    <button type="button" data-days="7">7 дн.</button>
-    <button type="button" data-days="30">30 дн.</button>
-    <button type="button" data-days="90">90 дн.</button>
-    <button type="button" data-days="0" aria-current="true">Всё</button>
-  </nav>
+  <div class="period-controls">
+    <nav class="periods" aria-label="Период">
+      <button type="button" data-days="7">7 дн.</button>
+      <button type="button" data-days="30">30 дн.</button>
+      <button type="button" data-days="90">90 дн.</button>
+      <button type="button" data-days="0" aria-current="true">Всё</button>
+    </nav>
+    <div class="dates">
+      <input type="date" id="date-from" aria-label="Начало периода">
+      <span class="dash">—</span>
+      <input type="date" id="date-to" aria-label="Конец периода">
+      <button type="button" id="dates-clear" hidden>Сбросить</button>
+    </div>
+  </div>
 </header>
 
 <main>
+  <section class="panel" id="open-panel" aria-labelledby="open-h" hidden>
+    <h2 id="open-h">Открытые позиции <span class="h-sub" id="open-sub"></span></h2>
+    <div class="table-wrap">
+      <table id="open-table">
+        <thead>
+          <tr>
+            <th scope="col">Символ</th>
+            <th scope="col">Напр.</th>
+            <th scope="col" class="num">Объём</th>
+            <th scope="col" class="num">Вход</th>
+            <th scope="col" class="num">Сейчас</th>
+            <th scope="col" class="num">Плечо</th>
+            <th scope="col" class="num">P&amp;L, USDT</th>
+            <th scope="col" class="num">Ликвидация</th>
+          </tr>
+        </thead>
+        <tbody id="open-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="charts">
+    <div class="panel" aria-labelledby="equity-h">
+      <h2 id="equity-h">Кривая эквити <span class="h-sub" id="equity-sub"></span></h2>
+      <div id="equity" class="chart"></div>
+    </div>
+    <div class="panel" aria-labelledby="daily-h">
+      <h2 id="daily-h">По дням <span class="h-sub" id="daily-sub"></span></h2>
+      <div id="daily" class="chart"></div>
+    </div>
+  </section>
+
   <section class="kpis" id="kpis" aria-live="polite"></section>
 
   <div class="columns">
@@ -29,18 +69,33 @@
       <div id="top-trades" class="histogram"></div>
     </section>
 
-    <section class="panel" aria-labelledby="rules-h">
-      <h2 id="rules-h">Правила <span class="h-sub" id="rules-sub"></span></h2>
-      <div id="rules-summary" class="rules-summary"></div>
-      <ul id="rules" class="rules"></ul>
-      <form id="rule-add" class="rule-add">
-        <input type="text" id="rule-input" maxlength="200"
-               placeholder="Своё правило: «не усредняться в убыток»"
-               aria-label="Новое правило">
-        <button type="submit">Добавить</button>
-      </form>
-      <p class="rules-hint" id="rules-hint"></p>
-    </section>
+    <div class="stack">
+      <section class="panel" aria-labelledby="rule-h" data-kind="rule">
+        <h2 id="rule-h">Правила <span class="h-sub" data-sub></span></h2>
+        <div class="rules-summary" data-summary></div>
+        <ul class="rules" data-list></ul>
+        <form class="rule-add" data-add>
+          <input type="text" maxlength="200"
+                 placeholder="Своё правило: «не усредняться в убыток»"
+                 aria-label="Новое правило">
+          <button type="submit">Добавить</button>
+        </form>
+        <p class="rules-hint" data-hint></p>
+      </section>
+
+      <section class="panel" aria-labelledby="reason-h" data-kind="reason">
+        <h2 id="reason-h">Основания входа <span class="h-sub" data-sub></span></h2>
+        <div class="rules-summary" data-summary></div>
+        <ul class="rules" data-list></ul>
+        <form class="rule-add" data-add>
+          <input type="text" maxlength="200"
+                 placeholder="Своя заготовка: «отскок от уровня»"
+                 aria-label="Новое основание">
+          <button type="submit">Добавить</button>
+        </form>
+        <p class="rules-hint" data-hint></p>
+      </section>
+    </div>
   </div>
 
   <section class="panel" aria-labelledby="trades-h">
@@ -59,7 +114,9 @@
             <th scope="col">Напр.</th>
             <th scope="col" class="num">Вход</th>
             <th scope="col" class="num">Выход</th>
+            <th scope="col" class="num">Плечо</th>
             <th scope="col" class="num">P&amp;L, USDT</th>
+            <th scope="col" class="num">PnL %</th>
             <th scope="col">Разбор</th>
           </tr>
         </thead>

@@ -144,6 +144,8 @@ h2 { font-size: 14px; margin: 0; }
 
 /* ---------- правила ---------- */
 
+.roi { font-size: 11px; opacity: 0.75; }
+
 .rules-cmp { font-size: 13px; }
 
 .rules-warn { color: var(--warn); font-size: 11px; margin-top: 2px; }

@@ -101,6 +101,9 @@ class FakeBybit:
     def closed_pnl(self, start, end, category="linear"):
         return iter(())
 
+    def positions(self, category="linear"):
+        return []
+
 
 class IncrementalBackfillTest(unittest.TestCase):
     """Круг раз в минуту не должен тянуть неделю истории заново."""

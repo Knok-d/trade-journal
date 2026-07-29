@@ -4,7 +4,8 @@
 "use strict";
 
 const tg = window.Telegram && window.Telegram.WebApp;
-const state = { days: 30, pendingOnly: false, limit: 20, initData: "", rules: [] };
+const state = { days: 30, pendingOnly: false, limit: 20, initData: "",
+                tags: { rule: [], reason: [] } };
 
 /* ---------- утилиты ---------- */
 
@@ -53,9 +54,45 @@ function renderHero(s, note) {
     hero.append(el("div", "sub", "Закрытых сделок за период нет."));
     return;
   }
+  const [elo, ehi] = s.expectancy_ci;
+  const zero = elo < 0 && ehi > 0;
   hero.append(el("div", "label", "Итог за период"));
   hero.append(el("div", "value " + cls(s.total), fmt.usd(s.total) + " USDT"));
-  hero.append(el("div", "sub", s.n + " сделок · " + note));
+  hero.append(el("div", "sub", s.n + " сделок · " + fmt.usd(s.expectancy) +
+    " на сделку" + (zero ? ", интервал накрывает ноль" : "")));
+  hero.append(el("div", "sub", note));
+}
+
+function renderOpen(open) {
+  const card = document.getElementById("open-card");
+  if (!open || !open.positions.length) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+
+  const box = document.getElementById("open");
+  box.replaceChildren();
+  for (const p of open.positions) {
+    const row = el("div", "row");
+    const left = el("div", "grow");
+    const head = el("div");
+    head.append(el("span", "sym", fmt.sym(p.symbol)));
+    head.append(el("span", "dir", " " + (p.direction === "long" ? "▲" : "▼")));
+    left.append(head);
+    left.append(el("div", "meta", "вход " + p.avg_entry +
+      (p.leverage ? " · " + p.leverage + "×" : "") +
+      (p.liq_price ? " · ликв. " + p.liq_price : "")));
+    row.append(left);
+    row.append(el("div", "num " + cls(p.unrealised), fmt.usd(p.unrealised)));
+    box.append(row);
+  }
+
+  // Возраст снимка обязателен: нереализованный P&L, показанный как текущий,
+  // но снятый десять минут назад, — худшее, что может показать дневник.
+  document.getElementById("open-sub").textContent = open.taken_at === null
+    ? "неизвестно, когда снято"
+    : Math.round((Date.now() - open.taken_at) / 60000) + " мин назад";
 }
 
 function renderFreshness(f) {
@@ -97,11 +134,8 @@ function renderTiles(data) {
       "нужно " + needed.toFixed(2), under));
   }
 
-  const [elo, ehi] = s.expectancy_ci;
-  const zero = elo < 0 && ehi > 0;
-  box.append(tile("На сделку", fmt.usd(s.expectancy), cls(s.expectancy),
-    zero ? "интервал накрывает ноль" : "95%: " + fmt.usd(elo) + "…" + fmt.usd(ehi),
-    zero));
+  // Плитки «на сделку» нет: это итог, делённый на число сделок. Ценным был
+  // только интервал, и он ушёл подписью к итогу в шапке.
 }
 
 /* ---------- правила ----------
@@ -109,45 +143,59 @@ function renderTiles(data) {
    правятся они на маке. Разбор с телефона и так основной сценарий, а набирать
    формулировку правила большим пальцем незачем. */
 
-function renderRules(data) {
-  const measured = data.rules;
-  const byId = {};
-  for (const r of measured.rules) byId[r.rule_id] = r;
+const KIND_WORDS = {
+  rule: { with: "с нарушением", without: "без нарушений",
+          empty: "Правила заводятся в дневнике на маке." },
+  reason: { with: "с основанием", without: "без основания",
+            empty: "Заготовки заводятся в дневнике на маке." },
+};
 
-  document.getElementById("rules-sub").textContent =
+/* На телефоне списки только читаются и отмечаются: заводить и править их
+   удобнее на маке, а разбор с телефона — основной сценарий. */
+function renderTagCard(kind, measured) {
+  const card = document.querySelector(`.card[data-kind="${kind}"]`);
+  const words = KIND_WORDS[kind];
+  const byId = {};
+  for (const t of measured.tags) byId[t.id] = t;
+
+  card.querySelector("[data-sub]").textContent =
     measured.of_total ? "разобрано " + measured.reviewed + " из " + measured.of_total : "";
 
-  const summary = document.getElementById("rules-summary");
+  const summary = card.querySelector("[data-summary]");
   summary.replaceChildren();
-  if (state.rules.length && (measured.violated.n || measured.clean.n)) {
+  if (state.tags[kind].length && (measured.violated.n || measured.clean.n)) {
     summary.append(el("div", "rules-cmp",
-      "с нарушением " + measured.violated.n + " — средний " +
-      fmt.usd(measured.violated.avg) + " · без нарушений " + measured.clean.n +
-      " — средний " + fmt.usd(measured.clean.avg)));
+      words.with + " " + measured.violated.n + " — средний " +
+      fmt.usd(measured.violated.avg) + " · " + words.without + " " +
+      measured.clean.n + " — средний " + fmt.usd(measured.clean.avg)));
     if (!measured.enough) {
       summary.append(el("div", "rules-warn",
         "в группах меньше " + measured.min_n + " сделок — разница пока ничего не доказывает"));
     }
   }
 
-  const box = document.getElementById("rules");
+  const box = card.querySelector("[data-list]");
   box.replaceChildren();
-  if (!state.rules.length) {
-    box.append(el("div", "hint", "Правила заводятся в дневнике на маке."));
+  if (!state.tags[kind].length) {
+    box.append(el("div", "hint", words.empty));
     return;
   }
-  for (const rule of state.rules) {
-    const measuredRule = byId[rule.rule_id];
-    if (!rule.active && !measuredRule) continue;
-    const row = el("div", "rule" + (rule.active ? "" : " archived"));
-    row.append(el("div", "grow", rule.body));
-    if (measuredRule) {
-      const stat = el("div", "num " + (measuredRule.total < 0 ? "neg" : ""),
-        measuredRule.n ? measuredRule.n + " · " + fmt.usd(measuredRule.total) : "—");
-      row.append(stat);
+  for (const tag of state.tags[kind]) {
+    const measuredTag = byId[tag.id];
+    if (!tag.active && !measuredTag) continue;
+    const row = el("div", "rule" + (tag.active ? "" : " archived"));
+    row.append(el("div", "grow", tag.body));
+    if (measuredTag) {
+      row.append(el("div", "num " + (measuredTag.total < 0 ? "neg" : ""),
+        measuredTag.n ? measuredTag.n + " · " + fmt.usd(measuredTag.total) : "—"));
     }
     box.append(row);
   }
+}
+
+function renderRules(data) {
+  renderTagCard("rule", data.rules);
+  renderTagCard("reason", data.reasons);
 }
 
 function renderTop(top) {
@@ -185,28 +233,31 @@ function editor(trade, row) {
   area.placeholder = "Почему заходил, что увидел, что пошло не так";
   wrap.append(area);
 
-  const active = state.rules.filter((r) => r.active);
-  if (active.length) {
+  for (const [kind, title] of [["reason", "На чём заходил:"],
+                              ["rule", "Какие правила нарушены:"]]) {
+    const active = state.tags[kind].filter((t) => t.active);
+    if (!active.length) continue;
+    const field = kind === "rule" ? "violations" : "reasons";
     const box = el("div", "violations");
-    box.append(el("div", "hint", "Какие правила нарушены:"));
-    for (const rule of active) {
+    box.append(el("div", "hint", title));
+    for (const tag of active) {
       const label = el("label", "violation");
       const check = el("input");
       check.type = "checkbox";
-      check.checked = trade.violations.includes(rule.rule_id);
+      check.checked = trade[field].includes(tag.id);
       check.addEventListener("change", async () => {
         check.disabled = true;
         try {
-          await api("/api/violation", {
+          await api("/api/mark", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              trade_id: trade.trade_id, rule_id: rule.rule_id, broken: check.checked,
+              kind, trade_id: trade.trade_id, id: tag.id, on: check.checked,
             }),
           });
-          trade.violations = check.checked
-            ? trade.violations.concat(rule.rule_id)
-            : trade.violations.filter((id) => id !== rule.rule_id);
+          trade[field] = check.checked
+            ? trade[field].concat(tag.id)
+            : trade[field].filter((id) => id !== tag.id);
           haptic("success");
           loadSummary().catch(() => {});
         } catch (err) {
@@ -216,7 +267,7 @@ function editor(trade, row) {
           check.disabled = false;
         }
       });
-      label.append(check, el("span", null, rule.body));
+      label.append(check, el("span", null, tag.body));
       box.append(label);
     }
     wrap.append(box);
@@ -264,10 +315,17 @@ function tradeRow(trade) {
   head.append(el("span", "sym", fmt.sym(trade.symbol)));
   head.append(el("span", "dir", " " + (trade.direction === "long" ? "▲" : "▼")));
   left.append(head);
-  left.append(el("div", "meta", fmt.date(trade.closed_at)));
+  left.append(el("div", "meta", fmt.date(trade.closed_at) +
+    (trade.leverage ? " · " + trade.leverage + "×" : "")));
   row.append(left);
   row.append(el("div", "mark", trade.note ? "📝" : ""));
-  row.append(el("div", "num " + cls(trade.net_pnl), fmt.usd(trade.net_pnl)));
+  const money = el("div", "num " + cls(trade.net_pnl));
+  money.append(el("div", null, fmt.usd(trade.net_pnl)));
+  // Прочерк, а не 0%: без плеча и объёма входа от биржи знаменателя нет.
+  money.append(el("div", "roi", trade.roi === null || trade.roi === undefined
+    ? "—"
+    : (trade.roi > 0 ? "+" : "") + (trade.roi * 100).toFixed(1) + "%"));
+  row.append(money);
 
   let open = null;
   row.addEventListener("click", () => {
@@ -303,14 +361,19 @@ let lastTrades = [];
 async function loadSummary() {
   const data = await api("/api/summary?days=" + state.days);
   renderFreshness(data.freshness);
+  renderOpen(data.open);
   renderHero(data.summary, data.sample_note);
   renderTiles(data);
   renderRules(data);
   renderTop(data.top_trades);
 }
 
-async function loadRules() {
-  state.rules = (await api("/api/rules")).rules;
+async function loadTags() {
+  const [rules, reasons] = await Promise.all([
+    api("/api/tags?kind=rule"),
+    api("/api/tags?kind=reason"),
+  ]);
+  state.tags = { rule: rules.tags, reason: reasons.tags };
 }
 
 async function loadTrades() {
@@ -331,7 +394,7 @@ function fail(message) {
 async function loadAll() {
   try {
     // Правила первыми: по ним рисуются и панель, и галочки в разборе.
-    await loadRules();
+    await loadTags();
     await Promise.all([loadSummary(), loadTrades()]);
   } catch (err) {
     fail("Не удалось загрузить: " + err.message);

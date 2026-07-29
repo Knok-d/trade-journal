@@ -272,6 +272,41 @@ class TwoWayJournalTest(unittest.TestCase):
         self.assertEqual(rows[0]["thesis"], "пробой уровня")
         self.assertIsNotNone(rows[0]["uid"])
 
+    def test_open_positions_are_replaced_not_accumulated(self):
+        """Закрытая позиция обязана исчезнуть с сервера, а не остаться призраком."""
+        db.save_open_positions(self.mac, [
+            {"symbol": "BTCUSDT", "side": "Buy", "size": "1", "avgPrice": "100",
+             "unrealisedPnl": "5", "leverage": "10"},
+            {"symbol": "ETHUSDT", "side": "Sell", "size": "2", "avgPrice": "50",
+             "unrealisedPnl": "-3", "leverage": "20"},
+        ])
+        self._push()
+        self.assertEqual(
+            {r["symbol"] for r in self.vps.execute("SELECT symbol FROM open_positions")},
+            {"BTCUSDT", "ETHUSDT"})
+
+        # ETH закрыт: биржа его больше не отдаёт
+        db.save_open_positions(self.mac, [
+            {"symbol": "BTCUSDT", "side": "Buy", "size": "1", "avgPrice": "100",
+             "unrealisedPnl": "9", "leverage": "10"},
+        ])
+        self._push()
+
+        rows = self.vps.execute(
+            "SELECT symbol, unrealised FROM open_positions").fetchall()
+        self.assertEqual([r["symbol"] for r in rows], ["BTCUSDT"],
+                         "закрытая позиция осталась на сервере")
+        self.assertEqual(rows[0]["unrealised"], "9", "цифры обязаны обновиться")
+
+    def test_empty_snapshot_is_a_fact_not_a_gap(self):
+        """«Позиций нет» отличается от «давно не спрашивали» — по отметке."""
+        db.save_open_positions(self.mac, [])
+        self._push()
+
+        self.assertEqual(
+            self.vps.execute("SELECT COUNT(*) c FROM open_positions").fetchone()["c"], 0)
+        self.assertIsNotNone(db.get_meta(self.vps, "positions_at"))
+
     def test_pull_does_not_touch_the_freshness_stamp(self):
         """Сервер к бирже не ходит — его штамп не должен затирать маковский."""
         from journal import stats

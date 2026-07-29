@@ -185,7 +185,13 @@ def rebuild(conn: sqlite3.Connection) -> dict:
         completed.append(open_position)
 
     conn.executemany(
-        "INSERT INTO round_trips VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        # Колонки поимённо: плечо и объём входа приходят не отсюда, а от биржи
+        # отдельным проходом, и безымянный VALUES ломался бы от их появления.
+        "INSERT INTO round_trips"
+        " (trade_id, category, symbol, position_idx, direction, opened_at, closed_at,"
+        "  qty, avg_entry, avg_exit, gross_pnl, fees, funding, net_pnl,"
+        "  liquidated, fee_mixed, fees_source)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [position.row() for position in completed],
     )
     conn.execute("DELETE FROM trade_close_orders")

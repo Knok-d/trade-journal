@@ -179,7 +179,7 @@ class RuleStatsTest(unittest.TestCase):
         result = stats.rule_stats(self.conn)
         self.assertFalse(result["enough"], "на одной сделке выводов быть не может")
         self.assertEqual(result["min_n"], stats.MIN_SLICE_N)
-        self.assertEqual(result["rules"][0]["n"], 1, "цифра при этом обязана быть видна")
+        self.assertEqual(result["tags"][0]["n"], 1, "цифра при этом обязана быть видна")
 
     def test_cleared_violation_stops_counting(self):
         trade = self._trade("c", "100", "90", 10 * HOUR)
@@ -191,7 +191,7 @@ class RuleStatsTest(unittest.TestCase):
         result = stats.rule_stats(self.conn)
         self.assertEqual(result["violated"]["n"], 0)
         self.assertEqual(result["clean"]["n"], 1)
-        self.assertEqual(result["rules"][0]["n"], 0)
+        self.assertEqual(result["tags"][0]["n"], 0)
 
     def test_archived_rule_keeps_its_history(self):
         trade = self._trade("a", "100", "90", 10 * HOUR)
@@ -200,14 +200,14 @@ class RuleStatsTest(unittest.TestCase):
         journal.set_violation(self.conn, trade, rule_id, True)
         journal.edit_rule(self.conn, rule_id, active=False)
 
-        shown = stats.rule_stats(self.conn)["rules"]
+        shown = stats.rule_stats(self.conn)["tags"]
         self.assertEqual(len(shown), 1, "правило с нарушениями не исчезает из отчёта")
         self.assertFalse(shown[0]["active"])
 
     def test_archived_rule_without_violations_disappears(self):
         journal.edit_rule(
             self.conn, journal.add_rule(self.conn, "передумал"), active=False)
-        self.assertEqual(stats.rule_stats(self.conn)["rules"], [])
+        self.assertEqual(stats.rule_stats(self.conn)["tags"], [])
 
 
 if __name__ == "__main__":

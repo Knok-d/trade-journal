@@ -20,17 +20,34 @@
 
   <div id="freshness" class="stale" role="status" hidden></div>
 
+  <section class="card" id="open-card" hidden>
+    <div class="card-head">
+      <h2>Открытые</h2>
+      <span class="sub" id="open-sub"></span>
+    </div>
+    <div id="open"></div>
+  </section>
+
   <section class="hero" id="hero" aria-live="polite"></section>
 
   <section class="tiles" id="tiles"></section>
 
-  <section class="card" id="rules-card">
+  <section class="card" data-kind="rule">
     <div class="card-head">
       <h2>Правила</h2>
-      <span class="sub" id="rules-sub"></span>
+      <span class="sub" data-sub></span>
     </div>
-    <div id="rules-summary"></div>
-    <div id="rules"></div>
+    <div data-summary></div>
+    <div data-list></div>
+  </section>
+
+  <section class="card" data-kind="reason">
+    <div class="card-head">
+      <h2>Основания входа</h2>
+      <span class="sub" data-sub></span>
+    </div>
+    <div data-summary></div>
+    <div data-list></div>
   </section>
 
   <section class="card">

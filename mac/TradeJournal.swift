@@ -40,13 +40,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     // MARK: окно
 
     private func buildWindow() {
+        // Без .fullSizeContentView: с ним титульная полоса остаётся под
+        // WKWebView, все нажатия достаются странице, и окно физически не за
+        // что схватить. Обычная полоса стоит двадцати восьми точек высоты и
+        // возвращает перетаскивание, полноэкранный режим и двойной клик.
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 860),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Trade Journal"
-        window.titlebarAppearsTransparent = true
-        window.minSize = NSSize(width: 720, height: 480)
+        window.minSize = NSSize(width: 640, height: 480)
+        // Страховка на случай, если полосу когда-нибудь снова спрячут: окно
+        // тащится и за фон.
+        window.isMovableByWindowBackground = true
         // Тема окна фиксированная: страница нарисована под тёмный фон, и на
         // светлой системе белые поля вокруг тёмной вёрстки выглядят поломкой.
         window.appearance = NSAppearance(named: .darkAqua)

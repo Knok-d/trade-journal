@@ -41,6 +41,39 @@ CSP_MINIAPP = (
 )
 
 
+def _open_positions(conn) -> dict:
+    """Открытые позиции плюс возраст снимка.
+
+    Возраст обязателен и отдаётся всегда: нереализованный P&L, показанный как
+    текущий, но снятый десять минут назад, — худшее, что может показать
+    дневник. Пустой список при свежей отметке значит «позиций нет», при
+    отсутствующей — «мы не спрашивали», и это разные вещи.
+    """
+    rows = conn.execute(
+        "SELECT * FROM open_positions ORDER BY symbol, position_idx"
+    ).fetchall()
+    taken = db.get_meta(conn, "positions_at")
+    return {
+        "taken_at": int(taken) if taken else None,
+        "positions": [
+            {
+                "symbol": r["symbol"],
+                "direction": r["direction"],
+                "qty": float(db.dec(r["qty"])),
+                "avg_entry": float(db.dec(r["avg_entry"])),
+                "mark_price": float(db.dec(r["mark_price"])) if r["mark_price"] else None,
+                "leverage": float(db.dec(r["leverage"])) if r["leverage"] else None,
+                "unrealised": float(db.dec(r["unrealised"])) if r["unrealised"] else None,
+                "liq_price": float(db.dec(r["liq_price"])) if r["liq_price"] else None,
+                "position_value": (float(db.dec(r["position_value"]))
+                                   if r["position_value"] else None),
+                "opened_at": r["opened_at"],
+            }
+            for r in rows
+        ],
+    }
+
+
 def _jsonable(value):
     if isinstance(value, Decimal):
         return float(value)
@@ -106,6 +139,16 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return 0
 
+    def _range(self) -> tuple[int | None, int | None]:
+        """Произвольный отрезок в миллисекундах. Пусто — значит период из days."""
+        def bound(name):
+            raw = self._query().get(name, [""])[0]
+            try:
+                return int(raw) if raw else None
+            except ValueError:
+                return None
+        return bound("from"), bound("to")
+
     def _payload(self) -> dict | None:
         """Тело POST как словарь. None — значит уже ответили 400."""
         try:
@@ -134,9 +177,9 @@ class Handler(BaseHTTPRequestHandler):
         elif route == "/api/trades":
             if self._authorized():
                 self._api_trades()
-        elif route == "/api/rules":
+        elif route == "/api/tags":
             if self._authorized():
-                self._api_rules()
+                self._api_tags()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -145,12 +188,12 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/api/note":
             if self._authorized():
                 self._api_note()
-        elif route == "/api/rule":
+        elif route == "/api/tag":
             if self._authorized():
-                self._api_rule()
-        elif route == "/api/violation":
+                self._api_tag()
+        elif route == "/api/mark":
             if self._authorized():
-                self._api_violation()
+                self._api_mark()
         else:
             self._json({"error": "not found"}, 404)
 
@@ -158,19 +201,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_summary(self):
         days = self._days()
+        since, until = self._range()
+        bounds = {"since": since, "until": until}
         conn = db.connect(self.db_path)
         try:
+            overall = stats.summary(conn, days, **bounds)
             payload = {
-                "summary": stats.summary(conn, days),
-                "top_trades": stats.top_trades(conn, days),
-                "holding": stats.holding_time(conn, days),
-                "r": {key: value for key, value in stats.r_multiples(conn, days).items()
+                "summary": overall,
+                "top_trades": stats.top_trades(conn, days, **bounds),
+                "holding": stats.holding_time(conn, days, **bounds),
+                "r": {key: value
+                      for key, value in stats.r_multiples(conn, days, **bounds).items()
                       if key != "values"},
                 "coverage": journal.coverage(conn),
                 "freshness": stats.freshness(conn),
-                "rules": stats.rule_stats(conn, days),
+                "rules": stats.tag_stats(conn, "rule", days, **bounds),
+                "reasons": stats.tag_stats(conn, "reason", days, **bounds),
+                "series": stats.series(conn, days, **bounds),
+                "open": _open_positions(conn),
                 "sync": dict(self.sync_state) if self.sync_state else None,
-                "sample_note": stats.sample_note(stats.summary(conn, days).get("n", 0)),
+                "sample_note": stats.sample_note(overall.get("n", 0)),
             }
         finally:
             conn.close()
@@ -178,11 +228,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api_trades(self):
         days = self._days()
+        since, until = self._range()
         pending_only = self._query().get("pending", ["0"])[0] == "1"
         conn = db.connect(self.db_path)
         try:
             where, params = "rt.closed_at IS NOT NULL", []
-            if days:
+            # Границы, если заданы, главнее относительного периода — так же,
+            # как в stats._closed, иначе таблица и сводка разошлись бы.
+            if since is not None or until is not None:
+                if since is not None:
+                    where += " AND rt.closed_at >= ?"
+                    params.append(since)
+                if until is not None:
+                    where += " AND rt.closed_at <= ?"
+                    params.append(until)
+            elif days:
                 where += (" AND rt.closed_at >="
                           " (SELECT MAX(closed_at) FROM round_trips) - ?")
                 params.append(days * stats.DAY_MS)
@@ -192,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT rt.trade_id, rt.symbol, rt.direction, rt.qty, rt.avg_entry,"
                 "       rt.avg_exit, rt.gross_pnl, rt.fees, rt.funding, rt.net_pnl,"
                 "       rt.opened_at, rt.closed_at, rt.liquidated, rt.fees_source,"
+                "       rt.leverage, rt.entry_value,"
                 "       n.body AS note, i.intent_id, i.thesis, i.planned_stop,"
                 "       i.match_note"
                 " FROM round_trips rt"
@@ -200,11 +261,13 @@ class Handler(BaseHTTPRequestHandler):
                 f" WHERE {where} ORDER BY rt.closed_at DESC",
                 params,
             ).fetchall()
-            broken = journal.violations_by_trade(conn)
+            broken = journal.marks_by_trade(conn, "rule")
+            applied = journal.marks_by_trade(conn, "reason")
             trades = []
             for r in rows:
                 trades.append({
                     "violations": broken.get(r["trade_id"], []),
+                    "reasons": applied.get(r["trade_id"], []),
                     "trade_id": r["trade_id"],
                     "symbol": r["symbol"],
                     "direction": r["direction"],
@@ -218,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
                     "closed_at": r["closed_at"],
                     "liquidated": bool(r["liquidated"]),
                     "fees_source": r["fees_source"],
+                    "leverage": float(db.dec(r["leverage"])) if r["leverage"] else None,
+                    "roi": stats.roi(r["net_pnl"], r["entry_value"], r["leverage"]),
                     "note": r["note"],
                     "has_intent": r["intent_id"] is not None,
                     "thesis": r["thesis"],
@@ -228,70 +293,92 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
         self._json({"trades": trades})
 
-    def _api_rules(self):
+    def _kind(self, data=None) -> str | None:
+        """Правило или основание. Вид приходит явно, умолчания нет."""
+        source = data if data is not None else {
+            k: v[0] for k, v in self._query().items()
+        }
+        kind = source.get("kind")
+        if kind not in journal.KINDS:
+            self._json({"error": "unknown kind"}, 400)
+            return None
+        return kind
+
+    def _api_tags(self):
+        kind = self._kind()
+        if kind is None:
+            return
+        _, id_column, _, _ = journal.KINDS[kind]
         conn = db.connect(self.db_path)
         try:
-            payload = {"rules": [
+            payload = {"tags": [
                 {
-                    "rule_id": r["rule_id"],
+                    "id": r[id_column],
                     "body": r["body"],
                     "active": bool(r["active"]),
                     "created_at": r["created_at"],
                 }
-                for r in journal.rules(conn, include_archived=True)
+                for r in journal.tags(conn, kind, include_archived=True)
             ]}
         finally:
             conn.close()
         self._json(payload)
 
-    def _api_rule(self):
-        """Создать правило (без rule_id), поправить текст или сдать в архив."""
+    def _api_tag(self):
+        """Создать (без id), поправить текст или сдать в архив."""
         data = self._payload()
         if data is None:
+            return
+        kind = self._kind(data)
+        if kind is None:
             return
 
         conn = db.connect(self.db_path)
         try:
             try:
-                if data.get("rule_id"):
-                    updated = journal.edit_rule(
-                        conn, data["rule_id"],
+                if data.get("id"):
+                    updated = journal.edit_tag(
+                        conn, kind, data["id"],
                         body=data.get("body"), active=data.get("active"),
                     )
                     if not updated:
-                        self._json({"error": "unknown rule"}, 404)
+                        self._json({"error": "unknown tag"}, 404)
                         return
-                    rule_id = data["rule_id"]
+                    tag_id = data["id"]
                 else:
-                    rule_id = journal.add_rule(conn, data.get("body", ""))
+                    tag_id = journal.add_tag(conn, kind, data.get("body", ""))
             except ValueError as exc:
                 self._json({"error": str(exc)}, 400)
                 return
-            payload = {"ok": True, "rule_id": rule_id}
+            payload = {"ok": True, "id": tag_id}
         finally:
             conn.close()
         self._json(payload)
 
-    def _api_violation(self):
+    def _api_mark(self):
         data = self._payload()
         if data is None:
             return
-        trade_id, rule_id = data.get("trade_id"), data.get("rule_id")
-        if not trade_id or not rule_id:
+        kind = self._kind(data)
+        if kind is None:
+            return
+        trade_id, tag_id = data.get("trade_id"), data.get("id")
+        if not trade_id or not tag_id:
             self._json({"error": "bad request"}, 400)
             return
 
+        table, id_column, _, _ = journal.KINDS[kind]
         conn = db.connect(self.db_path)
         try:
             known = conn.execute(
                 "SELECT 1 FROM round_trips WHERE trade_id = ?", (trade_id,)
             ).fetchone() and conn.execute(
-                "SELECT 1 FROM rules WHERE rule_id = ?", (rule_id,)
+                f"SELECT 1 FROM {table} WHERE {id_column} = ?", (tag_id,)
             ).fetchone()
             if not known:
-                self._json({"error": "unknown trade or rule"}, 404)
+                self._json({"error": "unknown trade or tag"}, 404)
                 return
-            journal.set_violation(conn, trade_id, rule_id, bool(data.get("broken")))
+            journal.set_mark(conn, kind, trade_id, tag_id, bool(data.get("on")))
             payload = {"ok": True}
         finally:
             conn.close()

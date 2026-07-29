@@ -72,6 +72,11 @@ def cmd_backfill(args) -> int:
     new_pnl = db.save_exchange_pnl(conn, pnl_rows)
     print(f"Записей closed-pnl биржи: {len(pnl_rows)} (новых {new_pnl})")
 
+    # Открытые позиции — снимок «прямо сейчас», а не история, поэтому берутся
+    # тем же проходом и заменяются целиком.
+    open_now = db.save_open_positions(conn, client.positions(category=args.category))
+    print(f"Открытых позиций: {open_now}")
+
     # Край двигается только после успеха обеих выкачек: упади мы посередине,
     # следующий запуск обязан повторить окно, а не считать его закрытым.
     conn.execute(
@@ -100,6 +105,11 @@ def cmd_rebuild(_args) -> int:
         )
 
     fees = reconcile.apply_exchange_fees(conn)
+    # Пересборка стирает round_trips целиком, поэтому плечо и объём входа
+    # проставляются заново — из уже выкачанного closed-pnl, без похода на биржу.
+    levers = reconcile.apply_leverage(conn)
+    print(f"Плечо и объём входа: заполнено {levers['filled']}"
+          + (f", без данных биржи {len(levers['missing'])}" if levers["missing"] else ""))
     if fees["patched"]:
         print(f"комиссия взята у биржи (списана не в USDT): {fees['patched']} сделок")
     if fees["unresolved"]:

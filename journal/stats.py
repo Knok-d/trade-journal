@@ -66,12 +66,27 @@ def freshness(conn: sqlite3.Connection, now_ms: int | None = None) -> dict:
     }
 
 
-def _closed(conn: sqlite3.Connection, days: int = 0) -> list[sqlite3.Row]:
+def _closed(conn: sqlite3.Connection, days: int = 0, *,
+            since: int | None = None, until: int | None = None) -> list[sqlite3.Row]:
+    """Закрытые сделки за период.
+
+    `since`/`until` — абсолютные границы в миллисекундах, произвольный отрезок.
+    `days` — старая относительная форма, и отсчитывается она от последней
+    сделки, а не от сегодня: «90 дней» на неделе без торговли означали бы
+    пустой отчёт, что читалось бы как поломка. Границы, если заданы, главнее.
+    """
     query = "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
-    params: tuple = ()
-    if days:
+    params: list = []
+    if since is not None or until is not None:
+        if since is not None:
+            query += " AND closed_at >= ?"
+            params.append(since)
+        if until is not None:
+            query += " AND closed_at <= ?"
+            params.append(until)
+    elif days:
         query += " AND closed_at >= (SELECT MAX(closed_at) FROM round_trips) - ?"
-        params = (days * DAY_MS,)
+        params.append(days * DAY_MS)
     return conn.execute(query + " ORDER BY closed_at", params).fetchall()
 
 
@@ -102,8 +117,9 @@ def bootstrap_mean_ci(values: list[Decimal], iterations: int = 2000,
     return (means[int(0.025 * iterations)], means[int(0.975 * iterations)])
 
 
-def summary(conn: sqlite3.Connection, days: int = 0) -> dict:
-    rows = _closed(conn, days)
+def summary(conn: sqlite3.Connection, days: int = 0, *,
+            since: int | None = None, until: int | None = None) -> dict:
+    rows = _closed(conn, days, since=since, until=until)
     if not rows:
         return {"n": 0}
 
@@ -143,9 +159,10 @@ def summary(conn: sqlite3.Connection, days: int = 0) -> dict:
     }
 
 
-def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9) -> dict:
+def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9, *,
+                  since: int | None = None, until: int | None = None) -> dict:
     """Распределение P&L. Именно оно, а не среднее, устойчиво на малой выборке."""
-    rows = _closed(conn, days)
+    rows = _closed(conn, days, since=since, until=until)
     if not rows:
         return {"n": 0, "bins": []}
 
@@ -165,13 +182,14 @@ def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9) -> 
     return {"n": len(values), "bins": bins, "min": lo, "max": hi}
 
 
-def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10) -> dict:
+def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10, *,
+               since: int | None = None, until: int | None = None) -> dict:
     """Топ прибыльных сделок: монета, направление, сколько взято.
 
     Рядом отдаётся доля топа во всей валовой прибыли — концентрация результата
     в паре сделок сама по себе факт, который стоит видеть, а не выяснять.
     """
-    rows = _closed(conn, days)
+    rows = _closed(conn, days, since=since, until=until)
     winners = sorted(
         (r for r in rows if dec(r["net_pnl"] or 0) > 0),
         key=lambda r: dec(r["net_pnl"]),
@@ -197,7 +215,8 @@ def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10) -> dict
     }
 
 
-def r_multiples(conn: sqlite3.Connection, days: int = 0) -> dict:
+def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
+                since: int | None = None, until: int | None = None) -> dict:
     """R-multiple по сделкам с заранее записанным стопом.
 
     Пусто — значит статистика недоступна, а не нулевая. Единственный способ её
@@ -215,7 +234,7 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0) -> dict:
         if risk:
             values.append(dec(row["net_pnl"]) / risk)
 
-    total_closed = len(_closed(conn, days))
+    total_closed = len(_closed(conn, days, since=since, until=until))
     return {
         "n": len(values),
         "of_total": total_closed,
@@ -225,13 +244,14 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0) -> dict:
 
 
 def by_symbol(conn: sqlite3.Connection, days: int = 0,
-              min_n: int = MIN_SLICE_N) -> dict:
+              min_n: int = MIN_SLICE_N, *,
+              since: int | None = None, until: int | None = None) -> dict:
     """Разрез по символам. Показываются только ячейки, где n достаточен.
 
     Возвращает и число скрытых срезов, и общее число проверенных — без этого
     читатель не видит, что «лучший символ» выбран из множества сравнений.
     """
-    rows = _closed(conn, days)
+    rows = _closed(conn, days, since=since, until=until)
     grouped: dict[str, list[Decimal]] = {}
     for row in rows:
         grouped.setdefault(row["symbol"], []).append(dec(row["net_pnl"]))
@@ -252,13 +272,14 @@ def by_symbol(conn: sqlite3.Connection, days: int = 0,
     return {"shown": shown, "hidden": len(grouped) - len(shown), "tested": len(grouped)}
 
 
-def holding_time(conn: sqlite3.Connection, days: int = 0) -> dict:
+def holding_time(conn: sqlite3.Connection, days: int = 0, *,
+                 since: int | None = None, until: int | None = None) -> dict:
     """Связь длительности удержания с результатом.
 
     Проверяет ходовую гипотезу «убыточные сделки держатся дольше» — то есть
     прибыль режется рано, а убыток пересиживается.
     """
-    rows = _closed(conn, days)
+    rows = _closed(conn, days, since=since, until=until)
     win_h, loss_h = [], []
     for row in rows:
         hours = (row["closed_at"] - row["opened_at"]) / 3_600_000
@@ -279,9 +300,50 @@ def holding_time(conn: sqlite3.Connection, days: int = 0) -> dict:
     }
 
 
-def rule_stats(conn: sqlite3.Connection, days: int = 0,
-               min_n: int = MIN_SLICE_N) -> dict:
-    """Во что нарушение собственных правил обходится в деньгах.
+def series(conn: sqlite3.Connection, days: int = 0, *,
+           since: int | None = None, until: int | None = None) -> list[dict]:
+    """Сделки за период по порядку закрытия, с накопленным итогом.
+
+    Отдаётся сырой ряд, а не готовые дневные столбики: границу суток надо
+    проводить по часовому поясу того, кто смотрит, а сервер стоит в другом.
+    Сделка, закрытая в два часа ночи, иначе уехала бы во вчера.
+    """
+    running = Decimal(0)
+    points = []
+    for row in _closed(conn, days, since=since, until=until):
+        running += dec(row["net_pnl"])
+        points.append({
+            "at": row["closed_at"],
+            "pnl": dec(row["net_pnl"]),
+            "cum": running,
+        })
+    return points
+
+
+def roi(net_pnl, entry_value, leverage) -> Decimal | None:
+    """Доходность на вложенную маржу — тот же ROI, что показывает Bybit.
+
+    Знаменатель — маржа, а не объём позиции: с плечом 20× движение цены на
+    процент даёт двадцать процентов на вложенное, и именно это трейдер видит
+    в кабинете. Без биржевых плеча и объёма входа возвращается None: считать
+    процент, придумав знаменатель, — худший вид точности.
+    """
+    if net_pnl is None or not entry_value or not leverage:
+        return None
+    margin = dec(entry_value) / dec(leverage)
+    if margin == 0:
+        return None
+    return dec(net_pnl) / margin
+
+
+def tag_stats(conn: sqlite3.Connection, kind: str = "rule", days: int = 0,
+              min_n: int = MIN_SLICE_N, *,
+              since: int | None = None, until: int | None = None) -> dict:
+    """Во что отметки на сделках обходятся в деньгах.
+
+    Одна механика на правила и основания: `kind` выбирает пару таблиц.
+    Для правил это «нарушил — не нарушил», для оснований «применил — не
+    применил», но считается одинаково.
 
     Считается только по РАЗОБРАННЫМ сделкам — тем, где есть непустая заметка.
     Галочки правил ставятся при разборе, поэтому у неразобранной сделки
@@ -293,16 +355,15 @@ def rule_stats(conn: sqlite3.Connection, days: int = 0,
     двух групп меньше `min_n`, разница между ними — шум. Цифры при этом
     показываются: скрывать их значило бы врать в другую сторону.
     """
-    rows = _closed(conn, days)
+    rows = _closed(conn, days, since=since, until=until)
     reviewed_ids = {
         r["trade_id"] for r in
         conn.execute("SELECT trade_id FROM notes WHERE body <> ''")
     }
-    broken: dict[str, list[str]] = {}
-    for row in conn.execute(
-        "SELECT trade_id, rule_id FROM rule_violations WHERE broken = 1"
-    ):
-        broken.setdefault(row["trade_id"], []).append(row["rule_id"])
+    from .journal import KINDS, marks_by_trade
+
+    table, id_column, _, _ = KINDS[kind]
+    broken = marks_by_trade(conn, kind)
 
     reviewed = [r for r in rows if r["trade_id"] in reviewed_ids]
     violated = [r for r in reviewed if broken.get(r["trade_id"])]
@@ -316,20 +377,21 @@ def rule_stats(conn: sqlite3.Connection, days: int = 0,
             "avg": (sum(values) / len(values)) if values else None,
         }
 
-    per_rule = []
-    for rule in conn.execute(
-        "SELECT rule_id, body, active FROM rules ORDER BY created_at, rule_id"
+    per_tag = []
+    for tag in conn.execute(
+        f"SELECT {id_column}, body, active FROM {table}"
+        f" ORDER BY created_at, {id_column}"
     ):
-        hits = [r for r in reviewed if rule["rule_id"] in broken.get(r["trade_id"], ())]
-        if not hits and not rule["active"]:
-            continue          # архивное правило без нарушений показывать незачем
+        hits = [r for r in reviewed if tag[id_column] in broken.get(r["trade_id"], ())]
+        if not hits and not tag["active"]:
+            continue          # архивная строка без отметок показывать незачем
         measured = group(hits)
         measured.update({
-            "rule_id": rule["rule_id"],
-            "body": rule["body"],
-            "active": bool(rule["active"]),
+            "id": tag[id_column],
+            "body": tag["body"],
+            "active": bool(tag["active"]),
         })
-        per_rule.append(measured)
+        per_tag.append(measured)
 
     return {
         "reviewed": len(reviewed),
@@ -338,5 +400,9 @@ def rule_stats(conn: sqlite3.Connection, days: int = 0,
         "clean": group(clean),
         "enough": min(len(violated), len(clean)) >= min_n,
         "min_n": min_n,
-        "rules": per_rule,
+        "tags": per_tag,
     }
+
+
+def rule_stats(conn: sqlite3.Connection, days: int = 0, **kwargs) -> dict:
+    return tag_stats(conn, "rule", days, **kwargs)

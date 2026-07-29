@@ -69,6 +69,40 @@ def apply_exchange_fees(conn: sqlite3.Connection) -> dict:
     return {"patched": patched, "unresolved": unresolved}
 
 
+def apply_leverage(conn: sqlite3.Connection) -> dict:
+    """Проставляет сделкам плечо и объём входа из closed-pnl биржи.
+
+    Из fills плечо не выводится — это настройка позиции, а не свойство
+    исполнения. Единственный источник тут биржа, и там, где сделка с closed-pnl
+    не сопоставилась, обе величины остаются пустыми: PnL% тогда честно
+    недоступен, а не равен нулю.
+
+    Объём входа складывается по всем закрывающим записям — биржа дробит
+    закрытие на несколько, и каждая несёт свою часть позиции. Плечо берётся из
+    первой: у одной позиции оно общее, потому что задаётся до входа.
+    """
+    filled, missing = 0, []
+    rows = conn.execute(
+        "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
+    ).fetchall()
+
+    for trade in rows:
+        candidates = _candidates(conn, trade)
+        leverage = next((c["leverage"] for c in candidates if c["leverage"]), None)
+        if not leverage:
+            missing.append(trade["trade_id"])
+            continue
+        entry_value = sum(dec(c["entry_value"] or 0) for c in candidates)
+        conn.execute(
+            "UPDATE round_trips SET leverage = ?, entry_value = ? WHERE trade_id = ?",
+            (leverage, str(entry_value), trade["trade_id"]),
+        )
+        filled += 1
+
+    conn.commit()
+    return {"filled": filled, "missing": missing}
+
+
 def reconcile(conn: sqlite3.Connection) -> dict:
     """Сопоставляет наши round_trips с записями closed-pnl биржи (локальными)."""
     ours = conn.execute(

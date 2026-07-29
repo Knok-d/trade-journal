@@ -113,54 +113,81 @@ class ServerTest(unittest.TestCase):
         status, _ = self._post("/api/note", {"trade_id": "nope", "body": "x"})
         self.assertEqual(status, 404)
 
-    def test_rule_lifecycle_over_api(self):
-        status, payload = self._post("/api/rule", {"body": "не усредняться в убыток"})
+    def test_tag_lifecycle_over_api(self):
+        status, payload = self._post(
+            "/api/tag", {"kind": "rule", "body": "не усредняться в убыток"})
         self.assertEqual(status, 200)
-        rule_id = payload["rule_id"]
+        tag_id = payload["id"]
 
-        _, _, body = self._get("/api/rules")
-        self.assertIn(rule_id, [r["rule_id"] for r in json.loads(body)["rules"]])
+        _, _, body = self._get("/api/tags?kind=rule")
+        self.assertIn(tag_id, [r["id"] for r in json.loads(body)["tags"]])
 
-        self._post("/api/rule", {"rule_id": rule_id, "body": "не усредняться вообще"})
-        self._post("/api/rule", {"rule_id": rule_id, "active": False})
-        _, _, body = self._get("/api/rules")
-        archived = [r for r in json.loads(body)["rules"] if r["rule_id"] == rule_id][0]
+        self._post("/api/tag",
+                   {"kind": "rule", "id": tag_id, "body": "не усредняться вообще"})
+        self._post("/api/tag", {"kind": "rule", "id": tag_id, "active": False})
+        _, _, body = self._get("/api/tags?kind=rule")
+        archived = [r for r in json.loads(body)["tags"] if r["id"] == tag_id][0]
         self.assertEqual(archived["body"], "не усредняться вообще")
         self.assertFalse(archived["active"])
 
-    def test_empty_rule_is_rejected_with_400(self):
-        status, _ = self._post("/api/rule", {"body": "  "})
+    def test_reasons_live_apart_from_rules(self):
+        """Основания и правила не должны смешиваться в одном списке."""
+        self._post("/api/tag", {"kind": "reason", "body": "отскок от уровня"})
+        _, _, rules_body = self._get("/api/tags?kind=rule")
+        _, _, reasons_body = self._get("/api/tags?kind=reason")
+
+        bodies = lambda raw: [t["body"] for t in json.loads(raw)["tags"]]
+        self.assertIn("отскок от уровня", bodies(reasons_body))
+        self.assertNotIn("отскок от уровня", bodies(rules_body))
+
+    def test_unknown_kind_is_rejected(self):
+        status, _ = self._post("/api/tag", {"kind": "выдумка", "body": "x"})
         self.assertEqual(status, 400)
 
-    def test_unknown_rule_edit_is_404(self):
-        status, _ = self._post("/api/rule", {"rule_id": "нет", "body": "x"})
+    def test_empty_tag_is_rejected_with_400(self):
+        status, _ = self._post("/api/tag", {"kind": "rule", "body": "  "})
+        self.assertEqual(status, 400)
+
+    def test_unknown_tag_edit_is_404(self):
+        status, _ = self._post("/api/tag", {"kind": "rule", "id": "нет", "body": "x"})
         self.assertEqual(status, 404)
 
-    def test_violation_appears_on_the_trade_and_can_be_cleared(self):
-        _, payload = self._post("/api/rule", {"body": "не входить против тренда"})
-        rule_id = payload["rule_id"]
+    def test_mark_appears_on_the_trade_and_can_be_cleared(self):
+        _, payload = self._post(
+            "/api/tag", {"kind": "reason", "body": "сигнал"})
+        tag_id = payload["id"]
 
         status, _ = self._post(
-            "/api/violation",
-            {"trade_id": self.trade_id, "rule_id": rule_id, "broken": True})
+            "/api/mark",
+            {"kind": "reason", "trade_id": self.trade_id, "id": tag_id, "on": True})
         self.assertEqual(status, 200)
-        self.assertEqual(self._violations_of(self.trade_id), [rule_id])
+        self.assertEqual(self._marks_of(self.trade_id, "reasons"), [tag_id])
 
-        self._post("/api/violation",
-                   {"trade_id": self.trade_id, "rule_id": rule_id, "broken": False})
-        self.assertEqual(self._violations_of(self.trade_id), [])
+        self._post("/api/mark",
+                   {"kind": "reason", "trade_id": self.trade_id,
+                    "id": tag_id, "on": False})
+        self.assertEqual(self._marks_of(self.trade_id, "reasons"), [])
 
-    def test_violation_for_unknown_rule_is_404(self):
+    def test_mark_for_unknown_tag_is_404(self):
         status, _ = self._post(
-            "/api/violation",
-            {"trade_id": self.trade_id, "rule_id": "нет-такого", "broken": True})
+            "/api/mark",
+            {"kind": "rule", "trade_id": self.trade_id, "id": "нет", "on": True})
         self.assertEqual(status, 404)
 
-    def _violations_of(self, trade_id):
+    def test_arbitrary_date_range_filters_trades(self):
+        _, _, body = self._get("/api/trades?from=0&to=%d" % (15 * HOUR))
+        symbols = [t["symbol"] for t in json.loads(body)["trades"]]
+        self.assertEqual(symbols, ["BTCUSDT"],
+                         "в отрезок попадает только сделка, закрытая внутри него")
+
+        _, _, body = self._get("/api/summary?from=0&to=%d" % (15 * HOUR))
+        self.assertEqual(json.loads(body)["summary"]["n"], 1)
+
+    def _marks_of(self, trade_id, field):
         _, _, body = self._get("/api/trades?days=0")
         trade = [t for t in json.loads(body)["trades"]
                  if t["trade_id"] == trade_id][0]
-        return trade["violations"]
+        return trade[field]
 
 
 class MiniAppAuthTest(unittest.TestCase):

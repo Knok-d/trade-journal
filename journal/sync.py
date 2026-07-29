@@ -31,8 +31,13 @@ from . import db, journal, reconcile, roundtrips
 
 # Данные биржи: едут только с Мака, на сервере лишь дополняются.
 TRADE_TABLES = ("raw_executions", "exchange_pnl")
+# Снимок текущего состояния биржи: заменяется целиком, а не дополняется.
+# Закрытая позиция обязана исчезнуть — тумбстоны здесь были бы призраками
+# с «текущим» P&L недельной давности. Правило «ничего не удаляем» — про
+# журнал, который пишет человек, и на снимок не распространяется.
+SNAPSHOT_TABLES = ("open_positions",)
 # Журнал: ездит в обе стороны, побеждает более свежая правка.
-JOURNAL_TABLES = ("notes", "rules", "rule_violations")
+JOURNAL_TABLES = ("notes", "rules", "rule_violations", "reasons", "trade_reasons")
 # Намерение правкам не подлежит по замыслу (иммутабельность — вся его ценность),
 # поэтому едет отдельным правилом: добавляется по новому uid и не переписывается.
 IMMUTABLE_JOURNAL_TABLES = ("intents",)
@@ -61,7 +66,7 @@ def export(conn: sqlite3.Connection, path: Path, *, journal_only: bool = False) 
         # Момент выгрузки едет вместе с данными: сервер сам к бирже не ходит и
         # иначе не знает, насколько он отстал.
         db.set_meta(conn, "synced_at", int(time.time() * 1000))
-        tables = TRADE_TABLES + ALL_JOURNAL_TABLES + ("meta",)
+        tables = TRADE_TABLES + SNAPSHOT_TABLES + ALL_JOURNAL_TABLES + ("meta",)
     counts = {}
     conn.execute("ATTACH DATABASE ? AS out", (str(path),))
     try:
@@ -151,11 +156,25 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
             after = conn.execute("SELECT COUNT(*) c FROM main.intents").fetchone()["c"]
             added["intents"] = after - before
 
-        # Отметка свежести, наоборот, всегда перезаписывается: она про то,
-        # когда данные в последний раз брали с биржи.
+        # Снимок открытых позиций заменяется целиком: позиция, которой в
+        # переносе нет, закрыта, и оставлять её на сервере значило бы врать
+        # текущим P&L. Первая таблица в проекте, где DELETE — это правильно.
+        for table in SNAPSHOT_TABLES:
+            if table not in present:
+                continue
+            columns = ", ".join(
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+            )
+            conn.execute(f"DELETE FROM main.{table}")
+            conn.execute(f"INSERT INTO main.{table} ({columns})"
+                         f" SELECT {columns} FROM src.{table}")
+
+        # Отметки свежести всегда перезаписываются: они про то, когда данные
+        # в последний раз брали с биржи, а ходит туда только мак.
         if "meta" in present:
             conn.execute(
-                "INSERT INTO main.meta SELECT key, value FROM src.meta WHERE key='synced_at'"
+                "INSERT INTO main.meta SELECT key, value FROM src.meta"
+                " WHERE key IN ('synced_at', 'positions_at')"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
             )
         conn.commit()
@@ -169,6 +188,7 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
     # сделки при свежих fills.
     stats = roundtrips.rebuild(conn)
     fees = reconcile.apply_exchange_fees(conn)
+    reconcile.apply_leverage(conn)      # пересборка обнуляет плечо, оно из биржи
     matched = journal.match_intents(conn)
     return {
         "added": added,

@@ -193,32 +193,44 @@ def new_id() -> str:
     return secrets.token_hex(8)
 
 
-def add_rule(conn: sqlite3.Connection, body: str) -> str:
+# Правила и основания устроены одинаково: свой список коротких формулировок
+# плюс отметки на сделках. Разница только в смысле — правило нарушают,
+# основание применяют. Поэтому таблицы разные, а работа с ними общая: две
+# почти одинаковые реализации разъезжаются на первой же правке.
+KINDS = {
+    "rule":   ("rules", "rule_id", "rule_violations", "Пустое правило нечего соблюдать"),
+    "reason": ("reasons", "reason_id", "trade_reasons", "Пустое основание ничего не значит"),
+}
+
+
+def add_tag(conn: sqlite3.Connection, kind: str, body: str) -> str:
+    table, id_column, _, empty_message = KINDS[kind]
     text = body.strip()
     if not text:
-        raise ValueError("Пустое правило нечего соблюдать")
-    rule_id, now = new_id(), int(time.time() * 1000)
+        raise ValueError(empty_message)
+    tag_id, now = new_id(), int(time.time() * 1000)
     conn.execute(
-        "INSERT INTO rules (rule_id, body, active, created_at, updated_at)"
+        f"INSERT INTO {table} ({id_column}, body, active, created_at, updated_at)"
         " VALUES (?,?,1,?,?)",
-        (rule_id, text, now, now),
+        (tag_id, text, now, now),
     )
     conn.commit()
-    return rule_id
+    return tag_id
 
 
-def edit_rule(conn: sqlite3.Connection, rule_id: str, *, body: str | None = None,
-              active: bool | None = None) -> bool:
-    """Правка текста и архивация. Возвращает False, если правила нет.
+def edit_tag(conn: sqlite3.Connection, kind: str, tag_id: str, *,
+             body: str | None = None, active: bool | None = None) -> bool:
+    """Правка текста и архивация. Возвращает False, если записи нет.
 
-    Архивация вместо удаления: на правило ссылаются нарушения уже разобранных
+    Архивация вместо удаления: на строку ссылаются отметки уже разобранных
     сделок, а `DELETE` вдобавок не пережил бы двусторонний синк.
     """
+    table, id_column, _, empty_message = KINDS[kind]
     assignments, params = [], []
     if body is not None:
         text = body.strip()
         if not text:
-            raise ValueError("Пустое правило нечего соблюдать")
+            raise ValueError(empty_message)
         assignments.append("body = ?")
         params.append(text)
     if active is not None:
@@ -228,38 +240,65 @@ def edit_rule(conn: sqlite3.Connection, rule_id: str, *, body: str | None = None
         return False
 
     assignments.append("updated_at = ?")
-    params.extend([int(time.time() * 1000), rule_id])
+    params.extend([int(time.time() * 1000), tag_id])
     cursor = conn.execute(
-        f"UPDATE rules SET {', '.join(assignments)} WHERE rule_id = ?", params
+        f"UPDATE {table} SET {', '.join(assignments)} WHERE {id_column} = ?", params
     )
     conn.commit()
     return cursor.rowcount > 0
 
 
-def rules(conn: sqlite3.Connection, *, include_archived: bool = False) -> list[sqlite3.Row]:
-    """Правила в порядке появления. Перестановок нет — порядок и так осмысленный."""
-    query = "SELECT * FROM rules"
+def tags(conn: sqlite3.Connection, kind: str, *,
+         include_archived: bool = False) -> list[sqlite3.Row]:
+    """В порядке появления. Перестановок нет — порядок и так осмысленный."""
+    table, id_column, _, _ = KINDS[kind]
+    query = f"SELECT * FROM {table}"
     if not include_archived:
         query += " WHERE active = 1"
-    return conn.execute(query + " ORDER BY created_at, rule_id").fetchall()
+    return conn.execute(query + f" ORDER BY created_at, {id_column}").fetchall()
 
 
-def set_violation(conn: sqlite3.Connection, trade_id: str, rule_id: str,
-                  broken: bool) -> None:
+def set_mark(conn: sqlite3.Connection, kind: str, trade_id: str, tag_id: str,
+             on: bool) -> None:
+    _, id_column, link, _ = KINDS[kind]
     conn.execute(
-        "INSERT INTO rule_violations (trade_id, rule_id, broken, updated_at)"
-        " VALUES (?,?,?,?) ON CONFLICT(trade_id, rule_id) DO UPDATE SET"
+        f"INSERT INTO {link} (trade_id, {id_column}, broken, updated_at)"
+        f" VALUES (?,?,?,?) ON CONFLICT(trade_id, {id_column}) DO UPDATE SET"
         " broken = excluded.broken, updated_at = excluded.updated_at",
-        (trade_id, rule_id, 1 if broken else 0, int(time.time() * 1000)),
+        (trade_id, tag_id, 1 if on else 0, int(time.time() * 1000)),
     )
     conn.commit()
 
 
-def violations_by_trade(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Нарушенные правила по сделкам. Снятые (broken=0) не попадают."""
+def marks_by_trade(conn: sqlite3.Connection, kind: str) -> dict[str, list[str]]:
+    """Проставленные отметки по сделкам. Снятые (broken=0) не попадают."""
+    _, id_column, link, _ = KINDS[kind]
     result: dict[str, list[str]] = {}
     for row in conn.execute(
-        "SELECT trade_id, rule_id FROM rule_violations WHERE broken = 1"
+        f"SELECT trade_id, {id_column} FROM {link} WHERE broken = 1"
     ):
-        result.setdefault(row["trade_id"], []).append(row["rule_id"])
+        result.setdefault(row["trade_id"], []).append(row[id_column])
     return result
+
+
+# Имена под правила: они старше и разошлись по коду и тестам.
+
+def add_rule(conn: sqlite3.Connection, body: str) -> str:
+    return add_tag(conn, "rule", body)
+
+
+def edit_rule(conn: sqlite3.Connection, rule_id: str, **kwargs) -> bool:
+    return edit_tag(conn, "rule", rule_id, **kwargs)
+
+
+def rules(conn: sqlite3.Connection, **kwargs) -> list[sqlite3.Row]:
+    return tags(conn, "rule", **kwargs)
+
+
+def set_violation(conn: sqlite3.Connection, trade_id: str, rule_id: str,
+                  broken: bool) -> None:
+    set_mark(conn, "rule", trade_id, rule_id, broken)
+
+
+def violations_by_trade(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    return marks_by_trade(conn, "rule")

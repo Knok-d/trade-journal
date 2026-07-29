@@ -130,6 +130,22 @@ class Bybit:
             )
             window_start = window_end
 
+    def positions(self, category: str = "linear") -> list[dict]:
+        """Открытые позиции прямо сейчас.
+
+        Единственное место, где дневник спрашивает у биржи текущее, а не
+        прошлое. Нереализованный P&L, плечо и цена ликвидации считаются
+        биржей, и пересчитывать их самим незачем: своя оценка разошлась бы с
+        той, по которой позицию реально ликвидируют.
+
+        `settleCoin` обязателен, когда символ не указан. Позиции с нулевым
+        объёмом биржа отдаёт наравне с живыми — это уже закрытые, они здесь
+        отсеиваются.
+        """
+        rows = self.paginate("/v5/position/list", category=category,
+                             settleCoin="USDT")
+        return [row for row in rows if (row.get("size") or "0") not in ("0", "")]
+
     def closed_pnl(self, start_ms: int, end_ms: int, category: str = "linear"):
         """Расчёт закрытых сделок самой биржей. Только для сверки, не источник данных."""
         window_start = start_ms
