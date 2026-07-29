@@ -287,9 +287,15 @@ def _reattach_journal(conn: sqlite3.Connection) -> None:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
         ).fetchone():
             continue
+        # Только строки, которые что-то несут. Пустой разбор и снятая отметка —
+        # это тумбстоны, оставленные прошлым переносом; они тоже сироты, и без
+        # этого условия следующий же вызов копировал бы пустоту поверх только
+        # что восстановленной заметки и стирал её. Ровно так и случилось.
+        carries = "body <> ''" if table == "notes" else "broken = 1"
         orphans = conn.execute(
             f"SELECT * FROM {table}"
-            "  WHERE trade_id NOT IN (SELECT trade_id FROM round_trips)"
+            f" WHERE {carries}"
+            "   AND trade_id NOT IN (SELECT trade_id FROM round_trips)"
         ).fetchall()
         for row in orphans:
             prefix = ":".join(row["trade_id"].split(":")[:3]) + ":"

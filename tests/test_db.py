@@ -143,6 +143,26 @@ class ReattachJournalTest(unittest.TestCase):
             "SELECT body FROM notes WHERE trade_id = 'BTCUSDT:0:1000:старый'").fetchone()
         self.assertEqual(old["body"], "", "старая строка обязана остаться тумбстоном")
 
+    def test_second_pass_does_not_wipe_what_the_first_restored(self):
+        """Тумбстон от прошлого переноса не должен затирать восстановленный разбор.
+
+        Функция вызывается на каждом подключении. Первый проход переносит
+        разбор и оставляет старую строку пустой — и если пустую строку тоже
+        считать сиротой, второй проход копирует пустоту поверх текста.
+        Так и потерялись три живых разбора.
+        """
+        from journal import journal
+        journal.add_note(self.conn, "BTCUSDT:0:1000:старый", "вошёл по сигналу")
+
+        db._reattach_journal(self.conn)
+        db._reattach_journal(self.conn)
+        db._reattach_journal(self.conn)
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT body FROM notes WHERE trade_id = 'BTCUSDT:0:1000:новый'"
+            ).fetchone()["body"], "вошёл по сигналу")
+
     def test_ambiguous_match_is_left_alone(self):
         """Две сделки под один префикс — молча привязывать нельзя."""
         from journal import journal
