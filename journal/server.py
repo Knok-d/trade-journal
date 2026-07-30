@@ -414,15 +414,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = 8321, db_path: Path = db.DB_PATH, *, miniapp: bool = False,
           bot_token: str = "", owner_id: int = 0, host: str = "127.0.0.1") -> None:
-    Handler.db_path = db_path
-    Handler.miniapp = miniapp
-    Handler.bot_token = bot_token
-    Handler.owner_id = owner_id
-
+    # Ошибка настройки ловится до того, как что-то настроено: иначе Handler уже
+    # переведён в режим Mini App, а исключение летит следом.
     if miniapp and not (bot_token and owner_id):
         raise ValueError(
             "режим Mini App без токена и владельца открыл бы историю торговли всем"
         )
+
+    Handler.db_path = db_path
+    Handler.miniapp = miniapp
+    Handler.bot_token = bot_token
+    Handler.owner_id = owner_id
 
     # По умолчанию 127.0.0.1, а не 0.0.0.0: дневник с историей счёта не должен
     # быть виден даже в локальной сети. Mini App слушает шире, но за HTTPS-прокси

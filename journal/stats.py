@@ -20,8 +20,14 @@ from .db import dec
 
 DAY_MS = 24 * 60 * 60 * 1000
 
-# Через сколько часов без обновления данные считаются несвежими. Синк ходит
-# раз в полчаса, так что три часа — это уже не «просто спал», а поломка.
+# Через сколько часов без обновления данные считаются несвежими.
+#
+# Отметку ставит мак, когда сходил на биржу (круг раз в минуту, см. app.py), а
+# смотрят на неё с телефона — через сервер, куда данные приезжают только пока
+# мак включён и в сети. Поэтому порог тут про «мак давно не выходил на связь»,
+# а не про сбой минутного круга: закрытая на ночь крышка не должна кричать
+# поломкой. Сам мак этот порог не использует — в приложении свежесть видна
+# точнее, по результату последнего круга (см. freshnessBanner в web/app.js).
 STALE_AFTER_HOURS = 3
 
 # Порог, ниже которого срез не показывается: на меньших ячейках «лучший сетап»
@@ -144,7 +150,13 @@ def summary(conn: sqlite3.Connection, days: int = 0, *,
         "avg_loss": avg_loss,
         # Во сколько раз средний выигрыш больше среднего проигрыша. Вместе с
         # win rate определяет знак матожидания: одного win rate недостаточно.
-        "payoff": (avg_win / abs(avg_loss)) if avg_loss else None,
+        #
+        # Без побед отношения нет, и это НЕ ноль: потребители считают рядом с
+        # ним «сколько нужно для безубытка» = (1 − win_rate) / win_rate, а на
+        # нулевом win rate это деление на ноль. Раньше payoff возвращался нулём,
+        # и период без единой прибыльной сделки ронял бота и текстовый отчёт,
+        # а в вебе рисовал «нужно Infinity».
+        "payoff": (avg_win / abs(avg_loss)) if (avg_loss and wins) else None,
         "expectancy": sum(net) / len(rows),
         "expectancy_ci": bootstrap_mean_ci(net),
         "gross": gross,
@@ -222,6 +234,11 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
     Пусто — значит статистика недоступна, а не нулевая. Единственный способ её
     получить — записывать стоп ДО входа (`intent --stop`).
     """
+    # Период применяется и к числителю, и к знаменателю. Раньше сделки со стопом
+    # брались за всю историю, а `of_total` считался за период, и отчёт мог
+    # сказать «посчитан по 40 сделкам из 12».
+    in_period = {row["trade_id"] for row in _closed(conn, days, since=since, until=until)}
+
     rows = conn.execute(
         "SELECT rt.trade_id, rt.avg_entry, rt.qty, rt.net_pnl, i.planned_stop"
         " FROM round_trips rt JOIN intents i ON i.matched_trade_id = rt.trade_id"
@@ -230,14 +247,15 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
 
     values = []
     for row in rows:
+        if row["trade_id"] not in in_period:
+            continue
         risk = abs(dec(row["avg_entry"]) - dec(row["planned_stop"])) * dec(row["qty"])
         if risk:
             values.append(dec(row["net_pnl"]) / risk)
 
-    total_closed = len(_closed(conn, days, since=since, until=until))
     return {
         "n": len(values),
-        "of_total": total_closed,
+        "of_total": len(in_period),
         "values": sorted(values),
         "available": bool(values),
     }
@@ -402,7 +420,3 @@ def tag_stats(conn: sqlite3.Connection, kind: str = "rule", days: int = 0,
         "min_n": min_n,
         "tags": per_tag,
     }
-
-
-def rule_stats(conn: sqlite3.Connection, days: int = 0, **kwargs) -> dict:
-    return tag_stats(conn, "rule", days, **kwargs)

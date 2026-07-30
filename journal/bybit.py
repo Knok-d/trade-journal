@@ -6,9 +6,9 @@
 
 import hashlib
 import hmac
+import http.client
 import json
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -64,7 +64,14 @@ class Bybit:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 body = json.load(response)
-        except urllib.error.URLError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # Шире, чем URLError (он и сам наследник OSError): биржа рвёт
+            # соединение прямо в ответе, и тогда прилетает RemoteDisconnected /
+            # ConnectionResetError мимо urllib. Такие обрывы наблюдались пять раз
+            # и печатали сорокастрочный трейсбек вместо строки в логе, роняя
+            # минутный круг целиком. Данные при этом целы: край выкачки
+            # (`sync_state`) двигается последним, и окно повторяется.
+            #
             # текст ошибки может содержать URL с параметрами — чистим на всякий случай
             raise BybitError(
                 keychain.redact(str(exc), self.api_key, self.api_secret)

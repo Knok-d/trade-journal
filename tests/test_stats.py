@@ -74,6 +74,45 @@ class StatsTest(unittest.TestCase):
         self.assertTrue(r["available"])
         self.assertEqual(r["values"], [1])   # прибыль 10 при риске 10
 
+    def test_r_multiple_respects_the_period(self):
+        """Сделка со стопом вне периода в R не попадает.
+
+        Числитель брался за всю историю, а знаменатель за период, и отчёт мог
+        сказать «посчитан по N сделкам из меньшего N».
+        """
+        journal.add_intent(self.conn, "BTCUSDT", "long", "старая",
+                           planned_stop="90", now_ms=9 * HOUR)
+        self._trade("old", "BTCUSDT", "100", "110")
+        self._trade("new", "ETHUSDT", "100", "110", at=10 * HOUR + 40 * 24 * HOUR)
+        roundtrips.rebuild(self.conn)
+        journal.match_intents(self.conn)
+
+        self.assertEqual(stats.r_multiples(self.conn)["n"], 1, "за всю историю — есть")
+
+        recent = stats.r_multiples(self.conn, days=7)
+        self.assertEqual(recent["n"], 0, "сделка со стопом старше периода")
+        self.assertEqual(recent["of_total"], 1)
+        self.assertLessEqual(recent["n"], recent["of_total"],
+                             "R не может быть посчитан по большему числу сделок,"
+                             " чем всего в периоде")
+
+    def test_losing_period_has_no_payoff(self):
+        """Период без единой прибыли: отношение прибыль/убыток не существует.
+
+        Раньше оно возвращалось нулём, а потребители считают рядом с ним
+        «сколько нужно для безубытка» = (1 − win_rate) / win_rate. При нулевом
+        win rate это деление на ноль: падал бот, падал текстовый отчёт, а веб
+        рисовал «нужно Infinity».
+        """
+        self._trade("l1", "BTCUSDT", "100", "90")
+        self._trade("l2", "ETHUSDT", "100", "80", at=12 * HOUR)
+        roundtrips.rebuild(self.conn)
+
+        s = stats.summary(self.conn)
+        self.assertEqual(s["wins"], 0)
+        self.assertIsNone(s["payoff"], "без побед отношения нет, и это не ноль")
+        self.assertNotIn("Infinity", report.render(self.conn))
+
     def test_symbol_slice_hidden_below_threshold(self):
         for i in range(5):
             self._trade(f"s{i}", "BTCUSDT", "100", "110", at=(10 + i) * HOUR)
@@ -157,12 +196,12 @@ class RuleStatsTest(unittest.TestCase):
         bad = self._trade("b", "100", "80", 20 * HOUR)       # −20, разобрана, нарушение
         self._trade("u", "100", "200", 30 * HOUR)            # +100, НЕ разобрана
 
-        rule_id = journal.add_rule(self.conn, "не усредняться в убыток")
+        rule_id = journal.add_tag(self.conn, "rule", "не усредняться в убыток")
         journal.add_note(self.conn, good, "по плану")
         journal.add_note(self.conn, bad, "полез усредняться")
-        journal.set_violation(self.conn, bad, rule_id, True)
+        journal.set_mark(self.conn, "rule", bad, rule_id, True)
 
-        result = stats.rule_stats(self.conn)
+        result = stats.tag_stats(self.conn, "rule")
         self.assertEqual(result["reviewed"], 2)
         self.assertEqual(result["of_total"], 3)
         self.assertEqual(result["clean"]["n"], 1,
@@ -172,42 +211,43 @@ class RuleStatsTest(unittest.TestCase):
 
     def test_small_groups_are_marked_as_not_enough(self):
         trade = self._trade("s", "100", "90", 10 * HOUR)
-        rule_id = journal.add_rule(self.conn, "не входить против тренда")
+        rule_id = journal.add_tag(self.conn, "rule", "не входить против тренда")
         journal.add_note(self.conn, trade, "разобрал")
-        journal.set_violation(self.conn, trade, rule_id, True)
+        journal.set_mark(self.conn, "rule", trade, rule_id, True)
 
-        result = stats.rule_stats(self.conn)
+        result = stats.tag_stats(self.conn, "rule")
         self.assertFalse(result["enough"], "на одной сделке выводов быть не может")
         self.assertEqual(result["min_n"], stats.MIN_SLICE_N)
         self.assertEqual(result["tags"][0]["n"], 1, "цифра при этом обязана быть видна")
 
     def test_cleared_violation_stops_counting(self):
         trade = self._trade("c", "100", "90", 10 * HOUR)
-        rule_id = journal.add_rule(self.conn, "не докупать на проливе")
+        rule_id = journal.add_tag(self.conn, "rule", "не докупать на проливе")
         journal.add_note(self.conn, trade, "разобрал")
-        journal.set_violation(self.conn, trade, rule_id, True)
-        journal.set_violation(self.conn, trade, rule_id, False)
+        journal.set_mark(self.conn, "rule", trade, rule_id, True)
+        journal.set_mark(self.conn, "rule", trade, rule_id, False)
 
-        result = stats.rule_stats(self.conn)
+        result = stats.tag_stats(self.conn, "rule")
         self.assertEqual(result["violated"]["n"], 0)
         self.assertEqual(result["clean"]["n"], 1)
         self.assertEqual(result["tags"][0]["n"], 0)
 
     def test_archived_rule_keeps_its_history(self):
         trade = self._trade("a", "100", "90", 10 * HOUR)
-        rule_id = journal.add_rule(self.conn, "старое правило")
+        rule_id = journal.add_tag(self.conn, "rule", "старое правило")
         journal.add_note(self.conn, trade, "разобрал")
-        journal.set_violation(self.conn, trade, rule_id, True)
-        journal.edit_rule(self.conn, rule_id, active=False)
+        journal.set_mark(self.conn, "rule", trade, rule_id, True)
+        journal.edit_tag(self.conn, "rule", rule_id, active=False)
 
-        shown = stats.rule_stats(self.conn)["tags"]
+        shown = stats.tag_stats(self.conn, "rule")["tags"]
         self.assertEqual(len(shown), 1, "правило с нарушениями не исчезает из отчёта")
         self.assertFalse(shown[0]["active"])
 
     def test_archived_rule_without_violations_disappears(self):
-        journal.edit_rule(
-            self.conn, journal.add_rule(self.conn, "передумал"), active=False)
-        self.assertEqual(stats.rule_stats(self.conn)["tags"], [])
+        journal.edit_tag(
+            self.conn, "rule", journal.add_tag(self.conn, "rule", "передумал"),
+            active=False)
+        self.assertEqual(stats.tag_stats(self.conn, "rule")["tags"], [])
 
 
 if __name__ == "__main__":

@@ -144,4 +144,4 @@ def render(conn, days: int = 0) -> str:
             " тем вероятнее случайный «лидер»"
         )
 
-    return "\n".join(line for line in out if line != "")
+    return "\n".join(out)

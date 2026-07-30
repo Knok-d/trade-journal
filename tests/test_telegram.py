@@ -101,6 +101,26 @@ class TelegramTest(unittest.TestCase):
         self.assertIn("7д", labels)
         self.assertIn("· 30д ·", labels, "текущий период должен быть помечен")
 
+    def test_losing_period_does_not_crash_the_stats_screen(self):
+        """Период без единой прибыли ронял бота насмерть.
+
+        Рядом с отношением прибыль/убыток печатается «сколько нужно для
+        безубытка» = (1 − win_rate) / win_rate. При нулевом win rate это
+        деление на ноль, а ZeroDivisionError не ловится циклом опроса —
+        процесс бота просто умирал до перезапуска systemd.
+        """
+        self.conn.execute("DELETE FROM raw_executions")
+        db.save_executions(self.conn, [
+            fill("l1", "BTCUSDT", "Buy", "100", "1", 10 * HOUR),
+            fill("l2", "BTCUSDT", "Sell", "90", "1", 11 * HOUR),
+        ])
+        roundtrips.rebuild(self.conn)
+
+        text = self.texts(self.handle(update("/stats")))
+        self.assertIn("Побед", text, "экран должен строиться, а не падать")
+        self.assertNotIn("П/У", text,
+                         "без побед отношения прибыль/убыток не существует")
+
     def test_button_edits_message_instead_of_spamming(self):
         """Переключение периода правит сообщение на месте, а не шлёт новое."""
         actions = self.handle(press("stats:7", message_id=777))

@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from journal import db, journal, roundtrips  # noqa: E402
+from journal import db, journal, roundtrips, stats  # noqa: E402
 from tests.test_roundtrips import fill  # noqa: E402
 
 HOUR = 60 * 60 * 1000
@@ -91,21 +91,21 @@ class JournalTest(unittest.TestCase):
         journal.add_intent(
             self.conn, "BTCUSDT", "long", "с планом", planned_stop="90", now_ms=9 * HOUR
         )
-        trade = self._closed_long(entry="100", exit_="110")
+        self._closed_long(entry="100", exit_="110")
         journal.match_intents(self.conn)
 
         # риск = |100 - 90| * 1 = 10, прибыль 10 -> R = 1
-        self.assertEqual(journal.r_multiple(self.conn, trade["trade_id"]), Decimal("1"))
+        self.assertEqual(stats.r_multiples(self.conn)["values"], [Decimal("1")])
 
     def test_r_multiple_is_none_without_stop(self):
         journal.add_intent(self.conn, "BTCUSDT", "long", "без стопа", now_ms=9 * HOUR)
-        trade = self._closed_long()
+        self._closed_long()
         journal.match_intents(self.conn)
 
-        self.assertIsNone(
-            journal.r_multiple(self.conn, trade["trade_id"]),
-            "без записанного заранее стопа R не существует",
-        )
+        result = stats.r_multiples(self.conn)
+        self.assertFalse(result["available"],
+                         "без записанного заранее стопа R не существует")
+        self.assertEqual(result["values"], [])
 
     def test_coverage_counts_notes_and_intents(self):
         """Решение C: «разобрана» = заметка ИЛИ намерение; pre-trade — подпоказатель."""
@@ -189,35 +189,35 @@ class RulesTest(unittest.TestCase):
         """Автоинкремент дал бы двум разным правилам один id и потерял одно."""
         other = db.connect(Path(self.tmp.name) / "phone.db")
         try:
-            mine = journal.add_rule(self.conn, "не входить против тренда")
-            theirs = journal.add_rule(other, "не усредняться в убыток")
+            mine = journal.add_tag(self.conn, "rule", "не входить против тренда")
+            theirs = journal.add_tag(other, "rule", "не усредняться в убыток")
             self.assertNotEqual(mine, theirs)
         finally:
             other.close()
 
     def test_empty_rule_is_rejected(self):
         with self.assertRaises(ValueError):
-            journal.add_rule(self.conn, "   ")
+            journal.add_tag(self.conn, "rule", "   ")
 
     def test_archived_rule_leaves_the_list_but_not_the_table(self):
-        rule_id = journal.add_rule(self.conn, "не торговать после трёх убытков")
-        journal.edit_rule(self.conn, rule_id, active=False)
+        rule_id = journal.add_tag(self.conn, "rule", "не торговать после трёх убытков")
+        journal.edit_tag(self.conn, "rule", rule_id, active=False)
 
-        self.assertEqual(journal.rules(self.conn), [])
-        self.assertEqual(len(journal.rules(self.conn, include_archived=True)), 1)
+        self.assertEqual(journal.tags(self.conn, "rule"), [])
+        self.assertEqual(len(journal.tags(self.conn, "rule", include_archived=True)), 1)
 
     def test_edit_reports_unknown_rule(self):
-        self.assertFalse(journal.edit_rule(self.conn, "нет-такого", body="текст"))
+        self.assertFalse(journal.edit_tag(self.conn, "rule", "нет-такого", body="текст"))
 
     def test_violation_can_be_set_and_cleared(self):
         trade_id = self._trade()
-        rule_id = journal.add_rule(self.conn, "не усредняться в убыток")
+        rule_id = journal.add_tag(self.conn, "rule", "не усредняться в убыток")
 
-        journal.set_violation(self.conn, trade_id, rule_id, True)
-        self.assertEqual(journal.violations_by_trade(self.conn), {trade_id: [rule_id]})
+        journal.set_mark(self.conn, "rule", trade_id, rule_id, True)
+        self.assertEqual(journal.marks_by_trade(self.conn, "rule"), {trade_id: [rule_id]})
 
-        journal.set_violation(self.conn, trade_id, rule_id, False)
-        self.assertEqual(journal.violations_by_trade(self.conn), {})
+        journal.set_mark(self.conn, "rule", trade_id, rule_id, False)
+        self.assertEqual(journal.marks_by_trade(self.conn, "rule"), {})
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) c FROM rule_violations").fetchone()["c"],
             1, "снятое нарушение обязано остаться строкой, иначе синк его воскресит")

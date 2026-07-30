@@ -260,7 +260,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="journal")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("check-key", help="проверить, что ключ только на чтение")
+    sub.add_parser("check-key", help="проверить, что ключ только на чтение"
+                   ).set_defaults(func=cmd_check_key)
 
     for name, handler, help_text in (
         ("backfill", cmd_backfill, "выкачать fills за период"),
@@ -274,7 +275,8 @@ def main() -> int:
                            help="только новое с прошлой выкачки (для частых кругов)")
         p.set_defaults(func=handler)
 
-    sub.add_parser("rebuild", help="пересобрать сделки и привязать намерения")
+    sub.add_parser("rebuild", help="пересобрать сделки и привязать намерения"
+                   ).set_defaults(func=cmd_rebuild)
 
     intent = sub.add_parser("intent", help="записать обоснование ДО входа")
     intent.add_argument("symbol")
@@ -310,7 +312,8 @@ def main() -> int:
                              help="только интерфейс, без обновления данных")
     application.set_defaults(func=cmd_app)
 
-    sub.add_parser("bot", help="Telegram-бот: журнал с телефона")
+    sub.add_parser("bot", help="Telegram-бот: журнал с телефона"
+                   ).set_defaults(func=cmd_bot)
 
     exp = sub.add_parser("export", help="выгрузить данные для переноса на сервер")
     exp.add_argument("file")
@@ -331,14 +334,8 @@ def main() -> int:
     pending.set_defaults(func=cmd_pending)
 
     args = parser.parse_args()
-    handler = {
-        "check-key": cmd_check_key,
-        "rebuild": cmd_rebuild,
-        "bot": cmd_bot,
-    }.get(args.command) or args.func
-
     try:
-        return handler(args)
+        return args.func(args)
     except KeychainError as exc:
         print(exc, file=sys.stderr)
         return 2

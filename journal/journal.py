@@ -7,9 +7,6 @@
 import secrets
 import sqlite3
 import time
-from decimal import Decimal
-
-from .db import dec
 
 # Насколько долго намерение ждёт свою сделку. Дольше суток — это уже другая идея,
 # а не отложенный вход по той же.
@@ -85,29 +82,6 @@ def match_intents(conn: sqlite3.Connection) -> dict:
 
     conn.commit()
     return {"matched": matched, "ambiguous": ambiguous, "pending": len(pending) - matched}
-
-
-def r_multiple(conn: sqlite3.Connection, trade_id: str) -> Decimal | None:
-    """R считается ТОЛЬКО если стоп был записан до входа. Иначе None, не ноль.
-
-    Стоп, восстановленный по памяти после закрытия, — это не данные, и вся
-    R-статистика, построенная на нём, была бы фикцией.
-    """
-    row = conn.execute(
-        "SELECT rt.avg_entry, rt.qty, rt.net_pnl, i.planned_stop"
-        " FROM round_trips rt JOIN intents i ON i.matched_trade_id = rt.trade_id"
-        " WHERE rt.trade_id = ? AND rt.closed_at IS NOT NULL",
-        (trade_id,),
-    ).fetchone()
-
-    if row is None or not row["planned_stop"] or row["net_pnl"] is None:
-        return None
-
-    risk_per_unit = abs(dec(row["avg_entry"]) - dec(row["planned_stop"]))
-    risk = risk_per_unit * dec(row["qty"])
-    if risk == 0:
-        return None
-    return dec(row["net_pnl"]) / risk
 
 
 def coverage(conn: sqlite3.Connection, since_ms: int = 0) -> dict:
@@ -279,26 +253,3 @@ def marks_by_trade(conn: sqlite3.Connection, kind: str) -> dict[str, list[str]]:
     ):
         result.setdefault(row["trade_id"], []).append(row[id_column])
     return result
-
-
-# Имена под правила: они старше и разошлись по коду и тестам.
-
-def add_rule(conn: sqlite3.Connection, body: str) -> str:
-    return add_tag(conn, "rule", body)
-
-
-def edit_rule(conn: sqlite3.Connection, rule_id: str, **kwargs) -> bool:
-    return edit_tag(conn, "rule", rule_id, **kwargs)
-
-
-def rules(conn: sqlite3.Connection, **kwargs) -> list[sqlite3.Row]:
-    return tags(conn, "rule", **kwargs)
-
-
-def set_violation(conn: sqlite3.Connection, trade_id: str, rule_id: str,
-                  broken: bool) -> None:
-    set_mark(conn, "rule", trade_id, rule_id, broken)
-
-
-def violations_by_trade(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    return marks_by_trade(conn, "rule")

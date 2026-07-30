@@ -80,32 +80,6 @@ class LegacyColumnOrderTest(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_already_shifted_rows_are_repaired(self):
-        """База, куда успели записать провёрнутые значения, чинится сама."""
-        conn = db.connect(self.path)
-        try:
-            conn.execute(
-                "INSERT INTO raw_executions (exec_id, category, symbol, position_idx,"
-                " side, exec_type, exec_price, exec_qty, exec_fee, fee_currency,"
-                " closed_size, exec_time, order_id, raw, seq)"
-                " VALUES ('e-2','linear','BTCUSDT',0,'Buy','Trade','100','1','0.1',"
-                " 'USDT','0',1000, '42', ?, ?)",
-                (EXECUTION["orderId"], json.dumps(EXECUTION)),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        conn = db.connect(self.path)          # миграция ловит сдвиг на подключении
-        try:
-            row = conn.execute(
-                "SELECT * FROM raw_executions WHERE exec_id = 'e-2'").fetchone()
-            self.assertEqual(row["order_id"], EXECUTION["orderId"])
-            self.assertEqual(row["seq"], 42)
-            self.assertEqual(json.loads(row["raw"])["execId"], "e-1")
-        finally:
-            conn.close()
-
 
 class ReattachJournalTest(unittest.TestCase):
     """Разбор не должен теряться, если у сделки поменялся хвост trade_id.

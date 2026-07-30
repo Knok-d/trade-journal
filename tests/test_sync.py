@@ -104,7 +104,7 @@ class SyncTest(unittest.TestCase):
         self._add_trade(self.mac, "t1", "BTCUSDT", 10 * HOUR)
         mac_trade = self.mac.execute("SELECT trade_id FROM round_trips").fetchone()["trade_id"]
         journal.add_note(self.mac, mac_trade, "локальная заметка")
-        journal.add_rule(self.mac, "не усредняться в убыток")
+        journal.add_tag(self.mac, "rule", "не усредняться в убыток")
 
         self._transfer()
         self.assertEqual(
@@ -174,7 +174,7 @@ class TwoWayJournalTest(unittest.TestCase):
         return sync.merge(self.mac, path)
 
     def test_rule_created_on_mac_reaches_the_server(self):
-        rule_id = journal.add_rule(self.mac, "не усредняться в убыток")
+        rule_id = journal.add_tag(self.mac, "rule", "не усредняться в убыток")
         self._push()
         self.assertEqual(
             self.vps.execute("SELECT body FROM rules WHERE rule_id = ?",
@@ -182,14 +182,14 @@ class TwoWayJournalTest(unittest.TestCase):
             "не усредняться в убыток")
 
     def test_violation_marked_on_phone_reaches_the_mac(self):
-        rule_id = journal.add_rule(self.mac, "не входить против тренда")
+        rule_id = journal.add_tag(self.mac, "rule", "не входить против тренда")
         self._push()
 
         journal.add_note(self.vps, self.trade_id, "разобрал с телефона")
-        journal.set_violation(self.vps, self.trade_id, rule_id, True)
+        journal.set_mark(self.vps, "rule", self.trade_id, rule_id, True)
         self._pull()
 
-        self.assertEqual(journal.violations_by_trade(self.mac),
+        self.assertEqual(journal.marks_by_trade(self.mac, "rule"),
                          {self.trade_id: [rule_id]})
         self.assertEqual(
             self.mac.execute("SELECT body FROM notes").fetchone()["body"],
@@ -225,17 +225,17 @@ class TwoWayJournalTest(unittest.TestCase):
             "новое с телефона")
 
     def test_cleared_violation_does_not_come_back(self):
-        rule_id = journal.add_rule(self.mac, "не докупать на проливе")
-        journal.set_violation(self.mac, self.trade_id, rule_id, True)
+        rule_id = journal.add_tag(self.mac, "rule", "не докупать на проливе")
+        journal.set_mark(self.mac, "rule", self.trade_id, rule_id, True)
         self._push()
 
         time.sleep(0.002)
-        journal.set_violation(self.vps, self.trade_id, rule_id, False)
+        journal.set_mark(self.vps, "rule", self.trade_id, rule_id, False)
         self._pull()
         self._push()          # круг целиком: снятое не должно воскреснуть
 
-        self.assertEqual(journal.violations_by_trade(self.mac), {})
-        self.assertEqual(journal.violations_by_trade(self.vps), {})
+        self.assertEqual(journal.marks_by_trade(self.mac, "rule"), {})
+        self.assertEqual(journal.marks_by_trade(self.vps, "rule"), {})
 
     def test_cleared_note_does_not_come_back(self):
         journal.add_note(self.mac, self.trade_id, "было")
@@ -251,16 +251,16 @@ class TwoWayJournalTest(unittest.TestCase):
         self.assertEqual(journal.coverage(self.mac)["annotated"], 0)
 
     def test_archived_rule_does_not_come_back(self):
-        rule_id = journal.add_rule(self.mac, "передумал")
+        rule_id = journal.add_tag(self.mac, "rule", "передумал")
         self._push()
 
         time.sleep(0.002)
-        journal.edit_rule(self.vps, rule_id, active=False)
+        journal.edit_tag(self.vps, "rule", rule_id, active=False)
         self._pull()
         self._push()
 
-        self.assertEqual(journal.rules(self.mac), [])
-        self.assertEqual(journal.rules(self.vps), [])
+        self.assertEqual(journal.tags(self.mac, "rule"), [])
+        self.assertEqual(journal.tags(self.vps, "rule"), [])
 
     def test_intent_travels_once_and_keeps_its_own_id(self):
         journal.add_intent(self.mac, "BTCUSDT", "long", "пробой уровня")

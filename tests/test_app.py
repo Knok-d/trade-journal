@@ -42,6 +42,31 @@ class SyncLoopTest(unittest.TestCase):
         self.assertIsNotNone(loop.state["last_ok"])
         self.assertIsNone(loop.state["last_error"])
 
+    def test_skipped_round_is_neither_success_nor_failure(self):
+        """Нет сети — круг пропущен, а не пройден.
+
+        С кодом 0 приложение засчитывало пропуск успехом и рисовало «Данные
+        свежие» поверх цифр любой давности: мак за captive-порталом врал бы
+        уверенно. Штамп успеха не двигается, но и жаловаться не на что —
+        интерфейс сам покажет растущее «обновлено N мин назад».
+        """
+        loop = app.SyncLoop(script('echo "сети нет, пропускаю"; exit 75', self.root))
+        self.assertFalse(loop.run_once())
+        self.assertIsNone(loop.state["last_ok"], "пропуск не должен выглядеть успехом")
+        self.assertIsNone(loop.state["last_error"], "пропуск не поломка")
+
+    def test_skip_does_not_erase_an_earlier_success(self):
+        loop = app.SyncLoop(script('exit 0', self.root))
+        loop.run_once()
+        stamp = loop.state["last_ok"]
+
+        loop.script = script('echo "сети нет, пропускаю"; exit 75', self.root)
+        loop.run_once()
+        self.assertEqual(loop.state["last_ok"], stamp,
+                         "штамп остаётся прежним: данные и правда этой давности")
+        self.assertIsNone(loop.state["last_error"],
+                          "пропуск не должен выглядеть поломкой синхронизации")
+
     def test_failed_round_keeps_the_reason(self):
         loop = app.SyncLoop(script('echo "ПРОВАЛ: сервер не принял"; exit 3', self.root))
         self.assertFalse(loop.run_once())

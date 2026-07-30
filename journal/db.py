@@ -355,29 +355,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
         conn.commit()
 
-    # Починка провёрнутых колонок у fills.
-    #
-    # `seq` добавлялась миграцией, то есть встала в конец таблицы, а вставка
-    # шла безымянным VALUES по порядку из SCHEMA, где seq объявлена перед
-    # order_id и raw. Три значения поехали по кругу: в order_id попал seq,
-    # в raw — orderId, в seq — весь JSON.
-    #
-    # Ущерб был тихим и потому дорогим: по order_id сделки сопоставляются с
-    # closed-pnl биржи, так что новые сделки просто перестали проходить сверку,
-    # а сортировка fills внутри миллисекунды пошла по тексту JSON.
-    #
-    # Признак однозначный: в числовой по замыслу колонке лежит текст с '{'.
-    # Присваивания в UPDATE считаются от старой строки, поэтому разворот
-    # делается одним запросом.
-    if conn.execute(
-        "SELECT COUNT(*) c FROM raw_executions WHERE seq LIKE '{%'"
-    ).fetchone()["c"]:
-        conn.execute(
-            "UPDATE raw_executions"
-            "   SET order_id = raw, raw = seq, seq = CAST(order_id AS INTEGER)"
-            " WHERE seq LIKE '{%'"
-        )
-        conn.commit()
+    # Разовая починка провёрнутых колонок (история бага — у save_executions)
+    # снята: она искала признак полным перебором на КАЖДОМ подключении, а
+    # подключение — на каждый HTTP-запрос. Войти порче больше неоткуда:
+    # и save_executions, и sync.merge перечисляют колонки поимённо. Проверить
+    # руками: SELECT COUNT(*) FROM raw_executions WHERE typeof(seq) = 'text'.
 
     _reattach_journal(conn)
 
