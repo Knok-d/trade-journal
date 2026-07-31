@@ -16,7 +16,7 @@ import sqlite3
 import time
 from decimal import Decimal
 
-from .db import dec
+from .db import asset_filter, dec
 
 DAY_MS = 24 * 60 * 60 * 1000
 
@@ -73,27 +73,37 @@ def freshness(conn: sqlite3.Connection, now_ms: int | None = None) -> dict:
 
 
 def _closed(conn: sqlite3.Connection, days: int = 0, *,
-            since: int | None = None, until: int | None = None) -> list[sqlite3.Row]:
+            since: int | None = None, until: int | None = None,
+            asset: str | None = None) -> list[sqlite3.Row]:
     """Закрытые сделки за период.
 
     `since`/`until` — абсолютные границы в миллисекундах, произвольный отрезок.
     `days` — старая относительная форма, и отсчитывается она от последней
     сделки, а не от сегодня: «90 дней» на неделе без торговли означали бы
     пустой отчёт, что читалось бы как поломка. Границы, если заданы, главнее.
+
+    `asset` — класс актива (`crypto` | `tradfi`), пусто значит «всё». Отбор
+    живёт здесь, в единственной точке входа за сделками, поэтому сводка,
+    графики и разрезы не могут разъехаться между собой.
     """
-    query = "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
+    query = ("SELECT rt.* FROM round_trips rt"
+             " LEFT JOIN symbols s ON s.symbol = rt.symbol"
+             " WHERE rt.closed_at IS NOT NULL" + asset_filter(asset))
     params: list = []
     if since is not None or until is not None:
         if since is not None:
-            query += " AND closed_at >= ?"
+            query += " AND rt.closed_at >= ?"
             params.append(since)
         if until is not None:
-            query += " AND closed_at <= ?"
+            query += " AND rt.closed_at <= ?"
             params.append(until)
     elif days:
-        query += " AND closed_at >= (SELECT MAX(closed_at) FROM round_trips) - ?"
+        # Отсчёт от последней сделки ВООБЩЕ, а не последней в классе: иначе
+        # переключение на TradFi заодно сдвигало бы окно, и две половины
+        # перестали бы быть сравнимыми — а сравнивают их именно ради этого.
+        query += " AND rt.closed_at >= (SELECT MAX(closed_at) FROM round_trips) - ?"
         params.append(days * DAY_MS)
-    return conn.execute(query + " ORDER BY closed_at", params).fetchall()
+    return conn.execute(query + " ORDER BY rt.closed_at", params).fetchall()
 
 
 def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -124,8 +134,9 @@ def bootstrap_mean_ci(values: list[Decimal], iterations: int = 2000,
 
 
 def summary(conn: sqlite3.Connection, days: int = 0, *,
-            since: int | None = None, until: int | None = None) -> dict:
-    rows = _closed(conn, days, since=since, until=until)
+            since: int | None = None, until: int | None = None,
+            asset: str | None = None) -> dict:
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
     if not rows:
         return {"n": 0}
 
@@ -172,9 +183,10 @@ def summary(conn: sqlite3.Connection, days: int = 0, *,
 
 
 def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9, *,
-                  since: int | None = None, until: int | None = None) -> dict:
+                  since: int | None = None, until: int | None = None,
+                  asset: str | None = None) -> dict:
     """Распределение P&L. Именно оно, а не среднее, устойчиво на малой выборке."""
-    rows = _closed(conn, days, since=since, until=until)
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
     if not rows:
         return {"n": 0, "bins": []}
 
@@ -195,13 +207,14 @@ def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9, *,
 
 
 def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10, *,
-               since: int | None = None, until: int | None = None) -> dict:
+               since: int | None = None, until: int | None = None,
+               asset: str | None = None) -> dict:
     """Топ прибыльных сделок: монета, направление, сколько взято.
 
     Рядом отдаётся доля топа во всей валовой прибыли — концентрация результата
     в паре сделок сама по себе факт, который стоит видеть, а не выяснять.
     """
-    rows = _closed(conn, days, since=since, until=until)
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
     winners = sorted(
         (r for r in rows if dec(r["net_pnl"] or 0) > 0),
         key=lambda r: dec(r["net_pnl"]),
@@ -228,7 +241,8 @@ def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10, *,
 
 
 def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
-                since: int | None = None, until: int | None = None) -> dict:
+                since: int | None = None, until: int | None = None,
+                asset: str | None = None) -> dict:
     """R-multiple по сделкам с заранее записанным стопом.
 
     Пусто — значит статистика недоступна, а не нулевая. Единственный способ её
@@ -237,7 +251,8 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
     # Период применяется и к числителю, и к знаменателю. Раньше сделки со стопом
     # брались за всю историю, а `of_total` считался за период, и отчёт мог
     # сказать «посчитан по 40 сделкам из 12».
-    in_period = {row["trade_id"] for row in _closed(conn, days, since=since, until=until)}
+    in_period = {row["trade_id"] for row in
+                 _closed(conn, days, since=since, until=until, asset=asset)}
 
     rows = conn.execute(
         "SELECT rt.trade_id, rt.avg_entry, rt.qty, rt.net_pnl, i.planned_stop"
@@ -263,13 +278,14 @@ def r_multiples(conn: sqlite3.Connection, days: int = 0, *,
 
 def by_symbol(conn: sqlite3.Connection, days: int = 0,
               min_n: int = MIN_SLICE_N, *,
-              since: int | None = None, until: int | None = None) -> dict:
+              since: int | None = None, until: int | None = None,
+              asset: str | None = None) -> dict:
     """Разрез по символам. Показываются только ячейки, где n достаточен.
 
     Возвращает и число скрытых срезов, и общее число проверенных — без этого
     читатель не видит, что «лучший символ» выбран из множества сравнений.
     """
-    rows = _closed(conn, days, since=since, until=until)
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
     grouped: dict[str, list[Decimal]] = {}
     for row in rows:
         grouped.setdefault(row["symbol"], []).append(dec(row["net_pnl"]))
@@ -291,13 +307,14 @@ def by_symbol(conn: sqlite3.Connection, days: int = 0,
 
 
 def holding_time(conn: sqlite3.Connection, days: int = 0, *,
-                 since: int | None = None, until: int | None = None) -> dict:
+                 since: int | None = None, until: int | None = None,
+                 asset: str | None = None) -> dict:
     """Связь длительности удержания с результатом.
 
     Проверяет ходовую гипотезу «убыточные сделки держатся дольше» — то есть
     прибыль режется рано, а убыток пересиживается.
     """
-    rows = _closed(conn, days, since=since, until=until)
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
     win_h, loss_h = [], []
     for row in rows:
         hours = (row["closed_at"] - row["opened_at"]) / 3_600_000
@@ -319,7 +336,8 @@ def holding_time(conn: sqlite3.Connection, days: int = 0, *,
 
 
 def series(conn: sqlite3.Connection, days: int = 0, *,
-           since: int | None = None, until: int | None = None) -> list[dict]:
+           since: int | None = None, until: int | None = None,
+           asset: str | None = None) -> list[dict]:
     """Сделки за период по порядку закрытия, с накопленным итогом.
 
     Отдаётся сырой ряд, а не готовые дневные столбики: границу суток надо
@@ -328,7 +346,7 @@ def series(conn: sqlite3.Connection, days: int = 0, *,
     """
     running = Decimal(0)
     points = []
-    for row in _closed(conn, days, since=since, until=until):
+    for row in _closed(conn, days, since=since, until=until, asset=asset):
         running += dec(row["net_pnl"])
         points.append({
             "at": row["closed_at"],
@@ -356,29 +374,37 @@ def roi(net_pnl, entry_value, leverage) -> Decimal | None:
 
 def tag_stats(conn: sqlite3.Connection, kind: str = "rule", days: int = 0,
               min_n: int = MIN_SLICE_N, *,
-              since: int | None = None, until: int | None = None) -> dict:
+              since: int | None = None, until: int | None = None,
+              asset: str | None = None) -> dict:
     """Во что отметки на сделках обходятся в деньгах.
 
     Одна механика на правила и основания: `kind` выбирает пару таблиц.
     Для правил это «нарушил — не нарушил», для оснований «применил — не
     применил», но считается одинаково.
 
-    Считается только по РАЗОБРАННЫМ сделкам — тем, где есть непустая заметка.
-    Галочки правил ставятся при разборе, поэтому у неразобранной сделки
-    нарушений нет не потому, что их не было, а потому, что никто не смотрел.
-    Попав в «чистые», такие сделки задрали бы их результат, и вывод получился
-    бы про разобранность, а не про правила.
+    Считается только по РАЗОБРАННЫМ сделкам — в том смысле, который задаёт
+    `journal.reviewed_sql`. Галочки правил ставятся при разборе, поэтому у
+    неразобранной сделки нарушений нет не потому, что их не было, а потому,
+    что никто не смотрел. Попав в «чистые», такие сделки задрали бы их
+    результат, и вывод получился бы про разобранность, а не про правила.
+
+    Основание в этом смысле равносильно заметке: правила и основания
+    отмечаются в одной и той же раскрытой карточке, и кто проставил одно,
+    видел и другое. А вот само нарушение разбором не считается — иначе
+    «нарушившие» пополнялись бы сделками, где галочку поставили, ни во что
+    больше не глядя, и группы перестали бы быть сравнимыми.
 
     `enough` отвечает на вопрос, можно ли вообще сравнивать: пока хоть одна из
     двух групп меньше `min_n`, разница между ними — шум. Цифры при этом
     показываются: скрывать их значило бы врать в другую сторону.
     """
-    rows = _closed(conn, days, since=since, until=until)
+    rows = _closed(conn, days, since=since, until=until, asset=asset)
+    from .journal import KINDS, marks_by_trade, reviewed_sql
+
     reviewed_ids = {
         r["trade_id"] for r in
-        conn.execute("SELECT trade_id FROM notes WHERE body <> ''")
+        conn.execute(f"SELECT trade_id FROM round_trips WHERE {reviewed_sql()}")
     }
-    from .journal import KINDS, marks_by_trade
 
     table, id_column, _, _ = KINDS[kind]
     broken = marks_by_trade(conn, kind)

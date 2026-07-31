@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -130,6 +131,26 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(archived["body"], "не усредняться вообще")
         self.assertFalse(archived["active"])
 
+    def test_reason_alone_marks_the_trade_reviewed(self):
+        """Основание без текста — тоже разбор: сделка уходит из «без разбора»."""
+        _, payload = self._post("/api/tag", {"kind": "reason", "body": "пробой"})
+        tag_id = payload["id"]
+        mark = {"kind": "reason", "trade_id": self.trade_id, "id": tag_id}
+        self._post("/api/mark", {**mark, "on": True})
+        try:
+            _, _, body = self._get("/api/trades?days=0")
+            trade = [t for t in json.loads(body)["trades"]
+                     if t["trade_id"] == self.trade_id][0]
+            self.assertTrue(trade["reviewed"])
+            self.assertIsNone(trade["note"], "текста нет — разбор только галочкой")
+
+            _, _, body = self._get("/api/trades?days=0&pending=1")
+            self.assertNotIn(self.trade_id,
+                             [t["trade_id"] for t in json.loads(body)["trades"]])
+        finally:
+            # Фикстура одна на класс: снятая галочка возвращает состояние назад.
+            self._post("/api/mark", {**mark, "on": False})
+
     def test_reasons_live_apart_from_rules(self):
         """Основания и правила не должны смешиваться в одном списке."""
         self._post("/api/tag", {"kind": "reason", "body": "отскок от уровня"})
@@ -188,6 +209,142 @@ class ServerTest(unittest.TestCase):
         trade = [t for t in json.loads(body)["trades"]
                  if t["trade_id"] == trade_id][0]
         return trade[field]
+
+
+class OpenTradeAndAssetTest(unittest.TestCase):
+    """Разбор на живой позиции и разделение крипты с TradFi.
+
+    Открытая сделка — единственная строка в дневнике, которую нельзя прятать
+    за фильтром периода: разбирать её надо, пока она открыта, а не когда стало
+    поздно.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        db_path = Path(cls.tmp.name) / "open.db"
+
+        conn = db.connect(db_path)
+        db.save_executions(conn, [
+            # Закрытая крипта — свежая, задаёт край окна для относительного периода.
+            fill("c1", "BTCUSDT", "Buy", "100", "1", 199 * HOUR),
+            fill("c2", "BTCUSDT", "Sell", "110", "1", 200 * HOUR),
+            # Открытое золото — вход давно, выхода нет вовсе.
+            fill("o1", "XAUUSDT", "Buy", "3000", "1", 10 * HOUR),
+        ])
+        roundtrips.rebuild(conn)
+        db.save_symbols(conn, [
+            {"symbol": "BTCUSDT", "symbolType": ""},
+            {"symbol": "XAUUSDT", "symbolType": "commodity"},
+        ])
+        cls.open_id = conn.execute(
+            "SELECT trade_id FROM round_trips WHERE closed_at IS NULL"
+        ).fetchone()["trade_id"]
+        cls.closed_id = conn.execute(
+            "SELECT trade_id FROM round_trips WHERE closed_at IS NOT NULL"
+        ).fetchone()["trade_id"]
+        conn.close()
+
+        server.Handler.db_path = db_path
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        cls.port = cls.httpd.server_address[1]
+        cls.db_path = db_path
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.tmp.cleanup()
+
+    def _trades(self, query=""):
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/trades{query}") as r:
+            return json.loads(r.read())["trades"]
+
+    def _note(self, trade_id, body):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/note",
+            data=json.dumps({"trade_id": trade_id, "body": body}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req) as r:
+            return r.status
+
+    def test_open_trade_comes_first(self):
+        trades = self._trades("?days=0")
+        self.assertIsNone(trades[0]["closed_at"], "открытая обязана быть сверху")
+        self.assertEqual(trades[0]["symbol"], "XAUUSDT")
+
+    def test_open_trade_survives_a_narrow_period(self):
+        """Позиция, открытая месяц назад и живая сейчас, не должна пропадать."""
+        symbols = [t["symbol"] for t in self._trades("?days=1")]
+        self.assertIn("XAUUSDT", symbols)
+        self.assertIn("BTCUSDT", symbols)
+
+    def test_open_trade_survives_an_explicit_range(self):
+        window = "?from=%d&to=%d" % (198 * HOUR, 201 * HOUR)
+        symbols = [t["symbol"] for t in self._trades(window)]
+        self.assertEqual(symbols, ["XAUUSDT", "BTCUSDT"])
+
+    def test_open_trade_has_no_invented_numbers(self):
+        """Чего нет — того нет: у живой позиции ни выхода, ни итога."""
+        live = self._trades("?days=0")[0]
+        self.assertIsNone(live["net_pnl"])
+        self.assertIsNone(live["avg_exit"])
+        self.assertIsNone(live["roi"])
+
+    def test_note_on_an_open_trade_is_marked_as_written_before_the_outcome(self):
+        self.assertEqual(self._note(self.open_id, "жду 3100, стоп под 2950"), 200)
+        live = [t for t in self._trades("?days=0") if t["trade_id"] == self.open_id][0]
+        self.assertEqual(live["note"], "жду 3100, стоп под 2950")
+        self.assertTrue(live["note_before_close"])
+
+    def test_note_written_after_the_close_is_not_marked(self):
+        self._note(self.closed_id, "задним числом")
+        closed = [t for t in self._trades("?days=0")
+                  if t["trade_id"] == self.closed_id][0]
+        self.assertFalse(closed["note_before_close"],
+                         "иначе поздний текст выдавался бы за ранний")
+
+    def _set_closed_at(self, at_ms):
+        conn = db.connect(self.db_path)
+        try:
+            conn.execute("UPDATE round_trips SET closed_at = ? WHERE trade_id = ?",
+                         (at_ms, self.closed_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_mark_survives_the_close(self):
+        """Разбор написан на живой позиции, потом сделка закрылась — метка остаётся."""
+        self._note(self.closed_id, "написано до выхода")
+        # Закрытие сдвигается в будущее относительно заметки: ровно так выглядит
+        # сделка, разобранная до того, как стал известен исход. Состояние
+        # возвращается назад — фикстура на весь класс одна, и следующий тест
+        # получил бы сделку, закрытую завтра.
+        self._set_closed_at(int(time.time() * 1000) + HOUR)
+        try:
+            closed = [t for t in self._trades("?days=0")
+                      if t["trade_id"] == self.closed_id][0]
+            self.assertTrue(closed["note_before_close"])
+        finally:
+            self._set_closed_at(200 * HOUR)
+
+    def test_asset_filter_splits_without_losing_anything(self):
+        everything = self._trades("?days=0")
+        crypto = self._trades("?days=0&asset=crypto")
+        tradfi = self._trades("?days=0&asset=tradfi")
+        self.assertEqual(len(everything), len(crypto) + len(tradfi))
+        self.assertEqual([t["symbol"] for t in tradfi], ["XAUUSDT"])
+        self.assertEqual([t["symbol"] for t in crypto], ["BTCUSDT"])
+
+    def test_asset_class_travels_with_every_trade(self):
+        by_symbol = {t["symbol"]: t["asset_class"] for t in self._trades("?days=0")}
+        self.assertEqual(by_symbol, {"XAUUSDT": "commodity", "BTCUSDT": "crypto"})
+
+    def test_unknown_asset_value_shows_everything(self):
+        """Пустой дневник читался бы как «сделок нет», а не как опечатка в адресе."""
+        self.assertEqual(len(self._trades("?days=0&asset=nonsense")), 2)
 
 
 class MiniAppAuthTest(unittest.TestCase):

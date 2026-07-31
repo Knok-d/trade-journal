@@ -42,6 +42,55 @@ class StatsTest(unittest.TestCase):
         self.assertIn("win_rate_ci", s, "доля обязана идти с интервалом")
         self.assertIn("expectancy_ci", s)
 
+    def test_asset_split_is_exhaustive(self):
+        """Крипта плюс TradFi обязаны давать ровно всё: пропажа была бы невидимой."""
+        self._trade("c", "BTCUSDT", "100", "110", at=10 * HOUR)
+        self._trade("s", "CRWVUSDT", "100", "90", at=11 * HOUR)
+        self._trade("m", "XAUUSDT", "100", "120", at=12 * HOUR)
+        roundtrips.rebuild(self.conn)
+        db.save_symbols(self.conn, [
+            {"symbol": "BTCUSDT", "symbolType": ""},
+            {"symbol": "CRWVUSDT", "symbolType": "stock"},
+            {"symbol": "XAUUSDT", "symbolType": "commodity"},
+        ])
+
+        everything = stats.summary(self.conn)["n"]
+        crypto = stats.summary(self.conn, asset="crypto")["n"]
+        tradfi = stats.summary(self.conn, asset="tradfi")["n"]
+        self.assertEqual((everything, crypto, tradfi), (3, 1, 2))
+
+    def test_innovation_zone_is_crypto_not_tradfi(self):
+        """Зона листинга новых токенов — та же крипта, а не другой класс актива."""
+        self._trade("i", "LABUSDT", "100", "110")
+        roundtrips.rebuild(self.conn)
+        db.save_symbols(self.conn, [{"symbol": "LABUSDT", "symbolType": "innovation"}])
+
+        self.assertEqual(stats.summary(self.conn, asset="crypto")["n"], 1)
+        self.assertEqual(stats.summary(self.conn, asset="tradfi").get("n"), 0)
+
+    def test_unknown_symbol_counts_as_crypto(self):
+        """Делистнутый инструмент из справочника пропадает, а сделки по нему нет."""
+        self._trade("d", "AERGOUSDT", "100", "110")
+        roundtrips.rebuild(self.conn)   # символа в справочнике нет вовсе
+
+        self.assertEqual(stats.summary(self.conn, asset="crypto")["n"], 1)
+        self.assertEqual(stats.summary(self.conn)["n"], 1)
+
+    def test_period_anchor_does_not_move_with_the_asset_filter(self):
+        """Иначе переключение класса заодно сдвигало бы окно, и половины стали бы
+        несравнимы — а сравнивают их именно ради этого."""
+        self._trade("old", "XAUUSDT", "100", "110", at=10 * HOUR)
+        self._trade("new", "BTCUSDT", "100", "110", at=200 * HOUR)
+        roundtrips.rebuild(self.conn)
+        db.save_symbols(self.conn, [
+            {"symbol": "BTCUSDT", "symbolType": ""},
+            {"symbol": "XAUUSDT", "symbolType": "commodity"},
+        ])
+
+        # Окно в сутки отсчитывается от последней сделки вообще (крипта, 200 ч),
+        # поэтому старая сделка по золоту в него не попадает.
+        self.assertEqual(stats.summary(self.conn, 1, asset="tradfi").get("n"), 0)
+
     def test_small_sample_is_labelled(self):
         self.assertIn("выводы делать рано", stats.sample_note(20))
         self.assertIn("гипотезы", stats.sample_note(150))

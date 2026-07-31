@@ -137,6 +137,16 @@ class Bybit:
             )
             window_start = window_end
 
+    def instruments(self, category: str = "linear") -> list[dict]:
+        """Справочник инструментов. Нужен ради `symbolType`: чем мы торговали —
+        криптой, акцией или товаром.
+
+        Ручка публичная и ключа не требует, но ходит тем же подписанным
+        транспортом: Bybit лишние заголовки игнорирует, а отдельная дорога без
+        подписи означала бы вторую реализацию `get` ради одного вызова.
+        """
+        return list(self.paginate("/v5/market/instruments-info", category=category))
+
     def positions(self, category: str = "linear") -> list[dict]:
         """Открытые позиции прямо сейчас.
 

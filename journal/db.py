@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS round_trips (
     -- в fills она в чужой валюте. Для таких сделок сверка проверяет склейку и
     -- gross, но не комиссию — это надо видеть, а не прятать.
     fees_source  TEXT NOT NULL DEFAULT 'fills',
+    -- Откуда взялась сама сделка: 'fills' — склеена нами из исполнений Bybit,
+    -- 'mt5' — принесена из выгрузки MT5 уже посчитанной. Пересборка стирает
+    -- только первые: вторые собирать не из чего, кроме mt5_positions, и
+    -- удалять их вместе с остальными значило бы терять их каждую минуту.
+    source       TEXT NOT NULL DEFAULT 'fills',
     -- Плечо и объём входа приходят от биржи (closed-pnl), а не считаются нами:
     -- из fills плечо не выводится вовсе, это настройка позиции. Обе колонки
     -- пустые там, где сделка с closed-pnl не сопоставилась, — и тогда PnL%
@@ -235,6 +240,56 @@ CREATE TABLE IF NOT EXISTS open_positions (
     PRIMARY KEY (symbol, position_idx)
 );
 
+-- Закрытые позиции с MT5 (Bybit TradFi CFD). Строки не удаляются, но, в
+-- отличие от fills, правятся повторным импортом той же строки: набирают их
+-- руками, а рука ошибается, и единственный способ исправить опечатку — ввести
+-- заново. Ключ выдаёт брокер, поэтому повторный импорт того же файла
+-- идемпотентен.
+--
+-- Второй источник данных, устроенный иначе первого, и это не лень, а свойство
+-- источника. Через API Bybit счёт MT5 не отдаётся вовсе (`category` знает
+-- только spot|linear|inverse|option), а веб-трейдер показывает не исполнения,
+-- а уже закрытые позиции с посчитанным брокером P&L.
+--
+-- Поэтому P&L здесь НЕ вычисляется нами и вычислен быть не может: объём в MT5
+-- указан в лотах, а прибыль равна разница_цен × размер_контракта × лоты, и
+-- размера контракта в выгрузке нет. На реальных сделках он оказался равен 1
+-- для акций и индекса и 10 для палладия — то есть наивная формула дала бы по
+-- палладию число, которое выглядит правдоподобно и завышено вдесятеро.
+-- Сверять эти сделки не с чем: второго независимого источника не существует.
+-- Отсюда `round_trips.source = 'mt5'` — это должно быть видно, а не спрятано.
+CREATE TABLE IF NOT EXISTS mt5_positions (
+    position_id  TEXT PRIMARY KEY,       -- «ID позиции» из выгрузки
+    symbol       TEXT NOT NULL,
+    direction    TEXT NOT NULL,          -- long | short
+    lots         TEXT NOT NULL,
+    open_price   TEXT NOT NULL,
+    close_price  TEXT NOT NULL,
+    opened_at    INTEGER NOT NULL,
+    closed_at    INTEGER NOT NULL,
+    gross_pnl    TEXT NOT NULL,          -- «P&L ордера»
+    fees         TEXT NOT NULL,          -- комиссия + налог
+    swap         TEXT NOT NULL,          -- «Обмен»; в журнале это фандинг с обратным знаком
+    net_pnl      TEXT NOT NULL,          -- «Общий P&L» = P&L ордера + обмен − комиссия
+    comment      TEXT,                   -- напр. «sl 335.00»: выход по стопу
+    entered_at   INTEGER NOT NULL
+);
+
+-- Справочник инструментов: чем торгуем — криптой, акцией или товаром.
+--
+-- Класс берётся у биржи (`symbolType` в /v5/market/instruments-info), а не
+-- зашивается списком: список разъехался бы на первом же листинге, а на глаз
+-- эти вещи не различаются вовсе — HEIUSDT читается как акция HEICO и является
+-- криптой, MUUSDT читается как токен и является Micron.
+--
+-- Строки не удаляются: делистнутый инструмент пропадает из ответа биржи, но
+-- сделки по нему остаются в истории, и класс им нужен по-прежнему.
+CREATE TABLE IF NOT EXISTS symbols (
+    symbol      TEXT PRIMARY KEY,
+    symbol_type TEXT NOT NULL,      -- как отдала биржа: '', stock, commodity, innovation
+    updated_at  INTEGER NOT NULL
+);
+
 -- Отметки о выкачанных периодах, чтобы бэкфилл не начинался каждый раз с нуля.
 CREATE TABLE IF NOT EXISTS sync_state (
     category   TEXT PRIMARY KEY,
@@ -251,6 +306,39 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 """
+
+
+# Какие типы биржи означают крипту. Перечислена именно крипта, а не TradFi, и
+# это сознательная инверсия: появись у Bybit `forex` или `index`, они попадут
+# в TradFi сами. Перечисляй мы наоборот — новый тип молча уехал бы в крипту и
+# растворился в её статистике, а такую ошибку не видно, пока её не ищешь.
+#
+# `innovation` — зона листинга новых токенов, то есть та же крипта, а не
+# отдельный класс актива.
+CRYPTO_SYMBOL_TYPES = ("", "innovation")
+
+_CRYPTO_TYPES_SQL = ", ".join(f"'{kind}'" for kind in CRYPTO_SYMBOL_TYPES)
+
+# Класс сделки одним выражением: crypto | stock | commodity. Запрос обязан
+# присоединить справочник как `s` — LEFT JOIN symbols s ON s.symbol = <t>.symbol.
+ASSET_CLASS_SQL = (
+    f"CASE WHEN COALESCE(s.symbol_type, '') IN ({_CRYPTO_TYPES_SQL})"
+    " THEN 'crypto' ELSE s.symbol_type END"
+)
+
+
+def asset_filter(asset: str | None) -> str:
+    """Кусок WHERE для отбора по классу актива. Пусто — значит без отбора.
+
+    Половин ровно две: крипта и всё остальное. Отдельных `stock` и `commodity`
+    здесь нет намеренно — дробить статистику на четыре части, имея по девять
+    сделок в каждой, значило бы искать закономерность в шуме (см. MIN_SLICE_N).
+    """
+    if asset == "crypto":
+        return f" AND COALESCE(s.symbol_type, '') IN ({_CRYPTO_TYPES_SQL})"
+    if asset == "tradfi":
+        return f" AND COALESCE(s.symbol_type, '') NOT IN ({_CRYPTO_TYPES_SQL})"
+    return ""
 
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
@@ -354,6 +442,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "ALTER TABLE round_trips ADD COLUMN fees_source TEXT NOT NULL DEFAULT 'fills'"
         )
         conn.commit()
+    if "source" not in rt_columns:
+        # Умолчание 'fills' верно для всего, что было до появления MT5: до этой
+        # колонки других источников не существовало.
+        conn.execute(
+            "ALTER TABLE round_trips ADD COLUMN source TEXT NOT NULL DEFAULT 'fills'"
+        )
+        conn.commit()
 
     # Разовая починка провёрнутых колонок (история бага — у save_executions)
     # снята: она искала признак полным перебором на КАЖДОМ подключении, а
@@ -448,6 +543,65 @@ def save_open_positions(conn: sqlite3.Connection, rows: list[dict],
     # Отметка ставится даже при пустом списке: «позиций нет» — тоже свежий факт,
     # и отличать его от «давно не спрашивали» интерфейс обязан.
     set_meta(conn, "positions_at", taken_at)
+    conn.commit()
+    return len(payload)
+
+
+def save_symbols(conn: sqlite3.Connection, rows: list[dict],
+                 updated_at: int | None = None) -> int:
+    """Обновляет справочник инструментов. Ничего не удаляет.
+
+    Перезапись, а не «вставить, если нет»: биржа может переклассифицировать
+    инструмент, и оставить прежний тип молча значило бы показывать акцию
+    криптой вечно. Инструменты, пропавшие из ответа биржи (делистнутые), в
+    справочнике остаются — сделки по ним никуда не делись.
+    """
+    updated_at = updated_at if updated_at is not None else int(time.time() * 1000)
+    conn.executemany(
+        "INSERT INTO symbols (symbol, symbol_type, updated_at) VALUES (?,?,?)"
+        " ON CONFLICT(symbol) DO UPDATE SET symbol_type = excluded.symbol_type,"
+        " updated_at = excluded.updated_at",
+        [(row["symbol"], row.get("symbolType") or "", updated_at) for row in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def save_mt5_positions(conn: sqlite3.Connection, rows: list[dict],
+                       entered_at: int | None = None) -> int:
+    """Пишет закрытые позиции MT5. Повторный ввод той же строки её заменяет.
+
+    Замена, а не «вставить, если нет»: строки набираются руками, и единственный
+    способ исправить опечатку — ввести заново. Ключ выдаёт брокер, поэтому
+    повторный импорт того же файла ничего не портит.
+    """
+    entered_at = entered_at if entered_at is not None else int(time.time() * 1000)
+    payload = [
+        (
+            row["position_id"], row["symbol"], row["direction"], str(row["lots"]),
+            str(row["open_price"]), str(row["close_price"]),
+            int(row["opened_at"]), int(row["closed_at"]),
+            str(row["gross_pnl"]), str(row["fees"]), str(row["swap"]),
+            str(row["net_pnl"]), row.get("comment"), entered_at,
+        )
+        for row in rows
+    ]
+    # Колонки поимённо — по той же причине, что у fills: безымянный VALUES
+    # опирается на физический порядок, а он расходится со SCHEMA после ALTER.
+    conn.executemany(
+        "INSERT INTO mt5_positions"
+        " (position_id, symbol, direction, lots, open_price, close_price,"
+        "  opened_at, closed_at, gross_pnl, fees, swap, net_pnl, comment, entered_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(position_id) DO UPDATE SET"
+        "   symbol = excluded.symbol, direction = excluded.direction,"
+        "   lots = excluded.lots, open_price = excluded.open_price,"
+        "   close_price = excluded.close_price, opened_at = excluded.opened_at,"
+        "   closed_at = excluded.closed_at, gross_pnl = excluded.gross_pnl,"
+        "   fees = excluded.fees, swap = excluded.swap, net_pnl = excluded.net_pnl,"
+        "   comment = excluded.comment, entered_at = excluded.entered_at",
+        payload,
+    )
     conn.commit()
     return len(payload)
 

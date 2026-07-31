@@ -84,23 +84,47 @@ def match_intents(conn: sqlite3.Connection) -> dict:
     return {"matched": matched, "ambiguous": ambiguous, "pending": len(pending) - matched}
 
 
+def reviewed_sql(alias: str = "") -> str:
+    """Что значит «сделка разобрана» — одним выражением на весь проект.
+
+    Определение живёт в пяти местах сразу: заголовочная метрика, список
+    неразобранных, фильтр «только без разбора» в вебе и в боте, отметка в
+    списке сделок и статистика правил. Пять копий этого условия разъезжались
+    бы на первой же правке — и разъехались бы молча, потому что каждая по
+    отдельности выглядела бы исправной.
+
+    Засчитывается любой след осознанного решения: разбор текстом, намерение до
+    входа ИЛИ проставленное основание. Отметка основания — это уже «я посмотрел
+    на сделку и назвал, на чём заходил»; требовать сверх неё ещё и абзац текста
+    значило бы показывать разобранность ниже настоящей.
+
+    Нарушенные правила сюда НЕ входят: галочка нарушения ставится при разборе,
+    и если считать её разбором, статистика правил начнёт объяснять сама себя —
+    в «чистых» окажутся только те сделки, где разбор писали текстом.
+    """
+    trade_id = f"{alias}.trade_id" if alias else "trade_id"
+    return (
+        f"({trade_id} IN (SELECT trade_id FROM notes WHERE body <> '')"
+        f" OR {trade_id} IN (SELECT matched_trade_id FROM intents"
+        "                    WHERE matched_trade_id IS NOT NULL)"
+        f" OR {trade_id} IN (SELECT trade_id FROM trade_reasons WHERE broken = 1))"
+    )
+
+
 def coverage(conn: sqlite3.Connection, since_ms: int = 0) -> dict:
     """Разобранность сделок — заголовочная метрика продукта (решение C).
 
-    «Разобрана» = есть хоть какое-то объяснение: заметка постфактум (основной
-    режим) ИЛИ намерение до входа (высший тир). Pre-trade считается отдельно
-    как подпоказатель — разрыв между ними и есть измеритель рационализации,
-    а не повод бить по рукам.
+    «Разобрана» — см. `reviewed_sql`: заметка постфактум (основной режим),
+    намерение до входа (высший тир) или проставленное основание. Pre-trade
+    считается отдельно как подпоказатель — разрыв между ними и есть
+    измеритель рационализации, а не повод бить по рукам.
     """
     total = conn.execute(
         "SELECT COUNT(*) c FROM round_trips WHERE opened_at >= ?", (since_ms,)
     ).fetchone()["c"]
     annotated = conn.execute(
         "SELECT COUNT(*) c FROM round_trips rt"
-        " WHERE rt.opened_at >= ? AND ("
-        "   rt.trade_id IN (SELECT trade_id FROM notes WHERE body <> '')"
-        "   OR rt.trade_id IN (SELECT matched_trade_id FROM intents"
-        "                      WHERE matched_trade_id IS NOT NULL))",
+        f" WHERE rt.opened_at >= ? AND {reviewed_sql('rt')}",
         (since_ms,),
     ).fetchone()["c"]
     with_intent = conn.execute(
@@ -143,12 +167,10 @@ def add_note(conn: sqlite3.Connection, trade_id: str, body: str) -> None:
 
 
 def unjournaled(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
-    """Закрытые сделки без разбора — ни заметки, ни намерения (решение C)."""
+    """Закрытые сделки без разбора — ни заметки, ни намерения, ни основания."""
     return conn.execute(
         "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
-        " AND trade_id NOT IN (SELECT trade_id FROM notes WHERE body <> '')"
-        " AND trade_id NOT IN (SELECT matched_trade_id FROM intents"
-        "                      WHERE matched_trade_id IS NOT NULL)"
+        f" AND NOT {reviewed_sql()}"
         " ORDER BY closed_at DESC LIMIT ?",
         (limit,),
     ).fetchall()

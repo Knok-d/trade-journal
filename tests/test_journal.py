@@ -139,6 +139,49 @@ class JournalTest(unittest.TestCase):
         pending = journal.unjournaled(self.conn)
         self.assertEqual([r["symbol"] for r in pending], ["ADAUSDT"])
 
+    def test_reason_alone_counts_as_reviewed(self):
+        """Отметил, на чём заходил, — значит на сделку посмотрел. Абзац сверху
+        требовать незачем, иначе разобранность показывается ниже настоящей."""
+        self._closed_long()
+        roundtrips.rebuild(self.conn)
+        trade_id = self.conn.execute(
+            "SELECT trade_id FROM round_trips").fetchone()["trade_id"]
+
+        self.assertEqual(journal.coverage(self.conn)["annotated"], 0)
+        self.assertEqual(len(journal.unjournaled(self.conn)), 1)
+
+        reason_id = journal.add_tag(self.conn, "reason", "отскок от уровня")
+        journal.set_mark(self.conn, "reason", trade_id, reason_id, True)
+
+        self.assertEqual(journal.coverage(self.conn)["annotated"], 1)
+        self.assertEqual(journal.unjournaled(self.conn), [])
+
+    def test_cleared_reason_returns_the_trade_to_pending(self):
+        """Снятая галочка остаётся строкой с broken=0 — она не должна считаться."""
+        self._closed_long()
+        roundtrips.rebuild(self.conn)
+        trade_id = self.conn.execute(
+            "SELECT trade_id FROM round_trips").fetchone()["trade_id"]
+        reason_id = journal.add_tag(self.conn, "reason", "сигнал")
+
+        journal.set_mark(self.conn, "reason", trade_id, reason_id, True)
+        journal.set_mark(self.conn, "reason", trade_id, reason_id, False)
+
+        self.assertEqual(journal.coverage(self.conn)["annotated"], 0)
+        self.assertEqual(len(journal.unjournaled(self.conn)), 1)
+
+    def test_broken_rule_alone_is_not_a_review(self):
+        """Иначе «нарушившие» пополнялись бы сделками, где галочку поставили,
+        ни во что больше не глядя, и группы перестали бы быть сравнимыми."""
+        self._closed_long()
+        roundtrips.rebuild(self.conn)
+        trade_id = self.conn.execute(
+            "SELECT trade_id FROM round_trips").fetchone()["trade_id"]
+        rule_id = journal.add_tag(self.conn, "rule", "не усредняться в убыток")
+        journal.set_mark(self.conn, "rule", trade_id, rule_id, True)
+
+        self.assertEqual(journal.coverage(self.conn)["annotated"], 0)
+
     def test_match_survives_rebuild(self):
         """Пересборка сделок не должна рвать связь с журналом."""
         journal.add_intent(self.conn, "BTCUSDT", "long", "тезис", now_ms=9 * HOUR)

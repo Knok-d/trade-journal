@@ -100,8 +100,77 @@ class _Position:
         )
 
 
+def rebuild_all(conn: sqlite3.Connection) -> dict:
+    """Полная пересборка: склейка и всё, что она стирает.
+
+    `rebuild` удаляет round_trips целиком, а вместе с ними — комиссию, взятую
+    у биржи (когда она списана в MNT), плечо и объём входа. Все три в fills
+    отсутствуют и проставляются отдельными проходами, поэтому вызвать одну
+    склейку и на этом остановиться значит оставить дневник с заниженным P&L
+    у сорока пяти сделок и провалить сверку.
+
+    Ровно это и случилось при первом импорте MT5: последовательность была
+    переписана в трёх местах, и в новом, четвёртом, три шага из четырёх просто
+    забылись. Поэтому теперь она одна и вызывается целиком.
+    """
+    from . import journal, reconcile
+
+    stats = rebuild(conn)
+    fees = reconcile.apply_exchange_fees(conn)
+    leverage = reconcile.apply_leverage(conn)
+    intents = journal.match_intents(conn)
+    return {**stats, "fees": fees, "leverage": leverage, "intents": intents}
+
+
+def _rebuild_mt5(conn: sqlite3.Connection) -> int:
+    """Переносит закрытые позиции MT5 в round_trips как есть.
+
+    Склейки здесь нет и быть не может: брокер отдаёт уже закрытые позиции с
+    посчитанным P&L, а исполнений не отдаёт вовсе. Считать P&L самим нельзя —
+    объём в лотах, а размер контракта в выгрузке отсутствует (см. комментарий
+    к `mt5_positions`). Поэтому цифры переносятся, а не выводятся, и сделка
+    помечается `source='mt5'`, чтобы это было видно.
+
+    `trade_id` детерминирован, как и у своих сделок: он выводится из ID
+    позиции, который выдал брокер, поэтому переживает и пересборку, и
+    повторный ввод строки — разбор не отвязывается.
+
+    Счёт в режиме хеджирования — на одном символе одновременно живут несколько
+    независимых позиций (три SP500, закрытых одной секундой). Поэтому каждая
+    позиция становится отдельной сделкой, а не склеивается с соседями по
+    символу: иначе три сделки схлопнулись бы в одну и разбор было бы не к чему
+    привязать.
+    """
+    rows = conn.execute("SELECT * FROM mt5_positions").fetchall()
+    conn.executemany(
+        "INSERT INTO round_trips"
+        " (trade_id, category, symbol, position_idx, direction, opened_at, closed_at,"
+        "  qty, avg_entry, avg_exit, gross_pnl, fees, funding, net_pnl,"
+        "  liquidated, fee_mixed, fees_source, source)"
+        " VALUES (?,'mt5',?,0,?,?,?,?,?,?,?,?,?,?,0,0,'mt5','mt5')",
+        [
+            (
+                f"mt5:{row['position_id']}", row["symbol"], row["direction"],
+                row["opened_at"], row["closed_at"], row["lots"],
+                row["open_price"], row["close_price"], row["gross_pnl"],
+                row["fees"],
+                # Своп прибавляется к P&L, а фандинг в журнале вычитается —
+                # значит это одна и та же величина с обратным знаком.
+                str(-dec(row["swap"])),
+                row["net_pnl"],
+            )
+            for row in rows
+        ],
+    )
+    return len(rows)
+
+
 def rebuild(conn: sqlite3.Connection) -> dict:
     """Пересобирает round_trips из сырых fills. Идемпотентно."""
+    # Целиком, включая MT5: это производная таблица, и обе её половины
+    # пересобираются здесь же — своя из fills, привозная из mt5_positions.
+    # Щадить вторую не нужно, у неё есть свой источник (и именно поэтому
+    # исправленная опечатка доезжает до дневника).
     conn.execute("DELETE FROM round_trips")
 
     # Порядок — по seq внутри миллисекунды: 80% fills делят exec_time с соседями,
@@ -194,6 +263,7 @@ def rebuild(conn: sqlite3.Connection) -> dict:
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [position.row() for position in completed],
     )
+    mt5 = _rebuild_mt5(conn)
     conn.execute("DELETE FROM trade_close_orders")
     conn.executemany(
         "INSERT OR IGNORE INTO trade_close_orders VALUES (?,?)",
@@ -208,8 +278,9 @@ def rebuild(conn: sqlite3.Connection) -> dict:
     closed = [p for p in completed if p.closed_at]
     return {
         "fills": len(fills),
-        "round_trips": len(completed),
-        "closed": len(closed),
+        "round_trips": len(completed) + mt5,
+        "closed": len(closed) + mt5,      # с MT5 приходят только закрытые
         "open": len(completed) - len(closed),
+        "mt5": mt5,
         "orphan_funding": orphan_funding,
     }

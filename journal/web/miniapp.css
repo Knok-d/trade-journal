@@ -41,7 +41,7 @@ h2 { font-size: 14px; margin: 0; }
 
 /* ---------- период ---------- */
 
-.periods {
+.periods, .assets {
   display: grid;
   grid-auto-flow: column;
   gap: var(--s1);
@@ -51,7 +51,7 @@ h2 { font-size: 14px; margin: 0; }
   margin-bottom: var(--s3);
 }
 
-.periods button {
+.periods button, .assets button {
   min-height: 36px;
   border: 0;
   border-radius: 9px;
@@ -62,7 +62,7 @@ h2 { font-size: 14px; margin: 0; }
   transition: background 150ms, color 150ms;
 }
 
-.periods button[aria-current="true"] { background: var(--btn); color: var(--btn-fg); }
+.periods button[aria-current="true"], .assets button[aria-current="true"] { background: var(--btn); color: var(--btn-fg); }
 
 /* ---------- герой ---------- */
 
@@ -210,6 +210,25 @@ h2 { font-size: 14px; margin: 0; }
 }
 
 .dir { color: var(--muted); font-size: 11px; }
+
+/* Открытая позиция: исход ещё не известен, поэтому строка помечена полосой,
+   а не цветом прибыли — красить нечего. */
+.row.live {
+  box-shadow: inset 2px 0 0 var(--btn);
+  padding-left: var(--s2);
+}
+
+.asset-tag {
+  margin-left: var(--s2);
+  padding: 0 var(--s1);
+  border: 1px solid var(--muted);
+  border-radius: var(--s1);
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
 
 .bar { height: 4px; border-radius: 2px; background: var(--pos); margin-top: 5px; }
 

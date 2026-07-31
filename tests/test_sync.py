@@ -298,6 +298,57 @@ class TwoWayJournalTest(unittest.TestCase):
                          "закрытая позиция осталась на сервере")
         self.assertEqual(rows[0]["unrealised"], "9", "цифры обязаны обновиться")
 
+    def test_symbol_directory_travels_and_reclassification_wins(self):
+        """К бирже ходит только мак, поэтому его справочник на сервере главный."""
+        db.save_symbols(self.mac, [{"symbol": "XAUUSDT", "symbolType": "commodity"}])
+        self._push()
+        self.assertEqual(
+            self.vps.execute(
+                "SELECT symbol_type FROM symbols WHERE symbol='XAUUSDT'"
+            ).fetchone()["symbol_type"], "commodity")
+
+        # Биржа переклассифицировала инструмент — сервер обязан это принять,
+        # а не оставить прежний тип и показывать акцию товаром.
+        db.save_symbols(self.mac, [{"symbol": "XAUUSDT", "symbolType": "stock"}])
+        self._push()
+        self.assertEqual(
+            self.vps.execute(
+                "SELECT symbol_type FROM symbols WHERE symbol='XAUUSDT'"
+            ).fetchone()["symbol_type"], "stock")
+
+    def test_mt5_positions_reach_the_server_and_become_trades(self):
+        """Вводятся они только на маке, а смотреть на них надо и с телефона."""
+        from journal import mt5
+        rows, problems = mt5.parse(
+            "AAPL.s\tЗакрыть шорт\tПродать\t5.0\t5.0\t-4.35\t-4.35\t0.00 USDx\t"
+            "0.0 USDx\t0.00 USDx\t334.30\t2025-03-14 23:02:04\t335.17\t"
+            "2025-03-14 23:06:46\t900000001\t--")
+        self.assertEqual(problems, [])
+        db.save_mt5_positions(self.mac, rows)
+        self._push()
+
+        trade = self.vps.execute(
+            "SELECT * FROM round_trips WHERE source = 'mt5'").fetchone()
+        self.assertEqual(trade["symbol"], "AAPL.s")
+        self.assertEqual(db.dec(trade["net_pnl"]), db.dec("-4.35"))
+
+    def test_corrected_mt5_typo_reaches_the_server(self):
+        """Дописывание не донесло бы правку, а при ручном вводе правка — норма."""
+        from journal import mt5
+        line = ("AAPL.s\tЗакрыть шорт\tПродать\t5.0\t5.0\t-4.35\t-4.35\t0.00 USDx\t"
+                "0.0 USDx\t0.00 USDx\t334.30\t2025-03-14 23:02:04\t335.17\t"
+                "2025-03-14 23:06:46\t900000001\t--")
+        db.save_mt5_positions(self.mac, mt5.parse(line)[0])
+        self._push()
+
+        db.save_mt5_positions(self.mac, mt5.parse(line.replace("-4.35", "-5.35"))[0])
+        self._push()
+
+        rows = self.vps.execute(
+            "SELECT net_pnl FROM round_trips WHERE source = 'mt5'").fetchall()
+        self.assertEqual(len(rows), 1, "исправление не должно задваивать сделку")
+        self.assertEqual(db.dec(rows[0]["net_pnl"]), db.dec("-5.35"))
+
     def test_empty_snapshot_is_a_fact_not_a_gap(self):
         """«Позиций нет» отличается от «давно не спрашивали» — по отметке."""
         db.save_open_positions(self.mac, [])

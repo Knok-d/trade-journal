@@ -10,6 +10,7 @@ import argparse
 import io
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -115,9 +116,15 @@ class FakeBybit:
 
     def __init__(self):
         self.windows = []
+        self.instrument_calls = 0
 
     def assert_read_only(self):
         return {"readOnly": 1}
+
+    def instruments(self, category="linear"):
+        self.instrument_calls += 1
+        return [{"symbol": "BTCUSDT", "symbolType": ""},
+                {"symbol": "XAUUSDT", "symbolType": "commodity"}]
 
     def executions(self, start, end, category="linear"):
         self.windows.append((start, end))
@@ -177,6 +184,43 @@ class IncrementalBackfillTest(unittest.TestCase):
             "SELECT category, synced_to FROM sync_state").fetchone()
         self.assertEqual(row["category"], "linear")
         self.assertIsNotNone(row["synced_to"])
+
+    def test_symbol_directory_is_not_refetched_every_round(self):
+        self._backfill(since_last=True)
+        self._backfill(since_last=True)
+        self.assertEqual(
+            self.client.instrument_calls, 1,
+            "справочник живёт сутки, а круг идёт раз в минуту: перечитывать"
+            " восемьсот инструментов каждую минуту незачем",
+        )
+
+    def test_unknown_symbol_refreshes_the_directory_ahead_of_time(self):
+        """Инструмент, залистенный и оторгованный сегодня, не ждёт до завтра."""
+        self._backfill(since_last=True)
+        self.conn.execute(
+            "INSERT INTO raw_executions (exec_id, category, symbol, position_idx,"
+            " side, exec_type, exec_price, exec_qty, exec_fee, exec_time, raw)"
+            " VALUES ('e1','linear','FRESHUSDT',0,'Buy','Trade','1','1','0',?,'{}')",
+            (int(time.time() * 1000) + 1000,),
+        )
+        self.conn.commit()
+        self._backfill(since_last=True)
+        self.assertEqual(self.client.instrument_calls, 2)
+
+    def test_delisted_symbol_does_not_refresh_the_directory_forever(self):
+        """Ловушка: биржа его больше не отдаёт, значит знакомым он не станет никогда."""
+        self.conn.execute(
+            "INSERT INTO raw_executions (exec_id, category, symbol, position_idx,"
+            " side, exec_type, exec_price, exec_qty, exec_fee, exec_time, raw)"
+            " VALUES ('old','linear','GONEUSDT',0,'Buy','Trade','1','1','0',1,'{}')"
+        )
+        self.conn.commit()
+        self._backfill(since_last=True)
+        self._backfill(since_last=True)
+        self.assertEqual(
+            self.client.instrument_calls, 1,
+            "делистнутый инструмент не должен гонять справочник каждый круг",
+        )
 
 
 class WalModeTest(unittest.TestCase):

@@ -83,7 +83,9 @@ def apply_leverage(conn: sqlite3.Connection) -> dict:
     """
     filled, missing = 0, []
     rows = conn.execute(
-        "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
+        # Только свои: у сделок с MT5 пары в closed-pnl нет по построению, и
+        # они попадали бы в «без данных биржи» каждым прогоном как шум.
+        "SELECT * FROM round_trips WHERE closed_at IS NOT NULL AND source = 'fills'"
     ).fetchall()
 
     for trade in rows:
@@ -104,10 +106,21 @@ def apply_leverage(conn: sqlite3.Connection) -> dict:
 
 
 def reconcile(conn: sqlite3.Connection) -> dict:
-    """Сопоставляет наши round_trips с записями closed-pnl биржи (локальными)."""
+    """Сопоставляет наши round_trips с записями closed-pnl биржи (локальными).
+
+    Сделки с MT5 в сверку не входят и войти не могут: второго источника по ним
+    не существует — брокер отдаёт одну-единственную цифру, и сравнивать её не с
+    чем. Это не «проверено и сошлось», а «проверить нечем», поэтому такие
+    сделки считаются отдельно и названы в отчёте: молча пропустить их значило
+    бы выдать непроверенное за проверенное.
+    """
     ours = conn.execute(
-        "SELECT * FROM round_trips WHERE closed_at IS NOT NULL ORDER BY closed_at"
+        "SELECT * FROM round_trips WHERE closed_at IS NOT NULL"
+        " AND source = 'fills' ORDER BY closed_at"
     ).fetchall()
+    unverifiable = conn.execute(
+        "SELECT COUNT(*) c FROM round_trips WHERE source <> 'fills'"
+    ).fetchone()["c"]
 
     mismatches, unmatched, matched = [], [], 0
     from_exchange = 0
@@ -159,6 +172,7 @@ def reconcile(conn: sqlite3.Connection) -> dict:
         "unmatched": unmatched,
         "mismatches": mismatches,
         "fees_from_exchange": from_exchange,
+        "unverifiable": unverifiable,
         "passed": not mismatches and not unmatched and matched > 0,
     }
 
@@ -173,6 +187,11 @@ def format_report(result: dict) -> str:
         lines.append(
             f"Из них с комиссией от биржи: {result['fees_from_exchange']}"
             " (комиссия в MNT — независимо не проверяется, склейка и gross проверены)"
+        )
+    if result.get("unverifiable"):
+        lines.append(
+            f"Вне сверки: {result['unverifiable']} сделок с MT5 — цифры от брокера,"
+            " второго источника по ним нет. Не «сошлось», а «сравнить не с чем»."
         )
     if result["unmatched"]:
         lines.append(f"\nБЕЗ ПАРЫ у биржи ({len(result['unmatched'])}) — склейка выдумала сделку:")

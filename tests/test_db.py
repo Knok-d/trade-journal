@@ -81,6 +81,40 @@ class LegacyColumnOrderTest(unittest.TestCase):
             conn.close()
 
 
+class SymbolDirectoryTest(unittest.TestCase):
+    """Справочник классов актива: обновляется, но ничего не теряет."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(Path(self.tmp.name) / "test.db")
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_reclassification_overwrites_the_old_type(self):
+        db.save_symbols(self.conn, [{"symbol": "XAUUSDT", "symbolType": "commodity"}])
+        db.save_symbols(self.conn, [{"symbol": "XAUUSDT", "symbolType": "stock"}])
+        rows = self.conn.execute("SELECT symbol_type FROM symbols").fetchall()
+        self.assertEqual([r["symbol_type"] for r in rows], ["stock"],
+                         "иначе акция вечно показывалась бы товаром")
+
+    def test_delisted_symbol_keeps_its_type(self):
+        """Биржа его больше не отдаёт, а сделки по нему в истории остались."""
+        db.save_symbols(self.conn, [{"symbol": "OLDUSDT", "symbolType": "stock"}])
+        db.save_symbols(self.conn, [{"symbol": "BTCUSDT", "symbolType": ""}])
+        kept = self.conn.execute(
+            "SELECT symbol_type FROM symbols WHERE symbol='OLDUSDT'").fetchone()
+        self.assertEqual(kept["symbol_type"], "stock")
+
+    def test_missing_type_is_stored_as_empty_not_null(self):
+        """Колонка NOT NULL: у крипты поле приходит пустым, а иногда отсутствует."""
+        db.save_symbols(self.conn, [{"symbol": "BTCUSDT"}])
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT symbol_type FROM symbols").fetchone()["symbol_type"], "")
+
+
 class ReattachJournalTest(unittest.TestCase):
     """Разбор не должен теряться, если у сделки поменялся хвост trade_id.
 

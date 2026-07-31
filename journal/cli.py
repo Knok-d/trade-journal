@@ -34,6 +34,40 @@ def cmd_check_key(_args) -> int:
 # дыре между окнами навсегда — повторная выкачка идемпотентна, дыра нет.
 OVERLAP_MS = 15 * 60 * 1000
 
+# Как часто перечитывать справочник инструментов. Круг идёт раз в минуту, а
+# класс актива у инструмента не меняется годами — тянуть восемьсот строк
+# каждую минуту незачем.
+SYMBOLS_TTL_MS = DAY_MS
+
+
+def _refresh_symbols(conn, client) -> int:
+    """Обновляет справочник инструментов. Возвращает, сколько взял (0 — не понадобилось).
+
+    Кроме суточного срока есть второй повод сходить: в сделках появился символ,
+    которого справочник не знает. Иначе инструмент, залистенный и оторгованный
+    сегодня, до завтра числился бы криптой — а листингов акций у Bybit уже сто
+    пятьдесят девять, и попасть на такой несложно.
+
+    Условие «незнакомый» намеренно ограничено сделками ПОСЛЕ прошлого обхода.
+    Без этой границы делистнутый инструмент (в базе такой есть — AERGOUSDT)
+    оставался бы незнакомым навсегда, потому что биржа его больше не отдаёт, и
+    справочник перечитывался бы каждую минуту.
+    """
+    last = int(db.get_meta(conn, "symbols_at") or 0)
+    now = int(time.time() * 1000)
+    fresh = last and now - last < SYMBOLS_TTL_MS
+    if fresh:
+        unknown = conn.execute(
+            "SELECT 1 FROM raw_executions WHERE exec_time > ?"
+            "   AND symbol NOT IN (SELECT symbol FROM symbols) LIMIT 1",
+            (last,),
+        ).fetchone()
+        if not unknown:
+            return 0
+    saved = db.save_symbols(conn, client.instruments(), updated_at=now)
+    db.set_meta(conn, "symbols_at", now)
+    return saved
+
 
 def cmd_backfill(args) -> int:
     client = bybit.Bybit()
@@ -66,6 +100,11 @@ def cmd_backfill(args) -> int:
     window = f"{(end - start) / DAY_MS:.2f} дн." if args.since_last else f"{args.days} дн."
     print(f"Выкачано за {window}: новых fills {total_new}")
 
+    # После fills, а не до: повод сходить за справочником — в том числе
+    # незнакомый символ среди только что выкачанного.
+    if symbols := _refresh_symbols(conn, client):
+        print(f"Справочник инструментов обновлён: {symbols}")
+
     # closed-pnl биржи тянется тем же проходом: он и арбитр для сверки, и
     # единственный источник USDT-комиссии там, где она списана в MNT.
     pnl_rows = list(client.closed_pnl(start, end, category=args.category))
@@ -93,10 +132,11 @@ def cmd_backfill(args) -> int:
 
 def cmd_rebuild(_args) -> int:
     conn = db.connect()
-    stats = roundtrips.rebuild(conn)
+    stats = roundtrips.rebuild_all(conn)
     print(
         f"fills: {stats['fills']} -> сделок: {stats['round_trips']}"
-        f" (закрытых {stats['closed']}, открытых {stats['open']})"
+        f" (закрытых {stats['closed']}, открытых {stats['open']}"
+        + (f", с MT5 {stats['mt5']}" if stats["mt5"] else "") + ")"
     )
     if stats["orphan_funding"]:
         print(
@@ -104,10 +144,7 @@ def cmd_rebuild(_args) -> int:
             "\n  Это значит, что склейка потеряла позицию. Разобрать до сверки."
         )
 
-    fees = reconcile.apply_exchange_fees(conn)
-    # Пересборка стирает round_trips целиком, поэтому плечо и объём входа
-    # проставляются заново — из уже выкачанного closed-pnl, без похода на биржу.
-    levers = reconcile.apply_leverage(conn)
+    fees, levers, matching = stats["fees"], stats["leverage"], stats["intents"]
     print(f"Плечо и объём входа: заполнено {levers['filled']}"
           + (f", без данных биржи {len(levers['missing'])}" if levers["missing"] else ""))
     if fees["patched"]:
@@ -118,7 +155,6 @@ def cmd_rebuild(_args) -> int:
             " — их P&L занижен на величину комиссии"
         )
 
-    matching = journal.match_intents(conn)
     print(f"намерений привязано: {matching['matched']}, ждут сделку: {matching['pending']}")
     if matching["ambiguous"]:
         print(
@@ -139,6 +175,73 @@ def cmd_intent(args) -> int:
     print(f"Намерение #{intent_id} записано: {args.symbol.upper()} {args.direction}")
     if not args.stop:
         print("  без планового стопа — R по этой сделке считаться не будет")
+    return 0
+
+
+# Класс актива для инструментов MT5. Не пусто и не innovation — значит TradFi
+# (см. db.CRYPTO_SYMBOL_TYPES), а «cfd» вдобавок говорит, с какой площадки
+# сделка: SP500.s и XLEUSDT — разные вещи, хотя обе про фондовый рынок.
+MT5_SYMBOL_TYPE = "cfd"
+
+
+def cmd_mt5_import(args) -> int:
+    """Вносит закрытые позиции с MT5 из текстового файла.
+
+    По умолчанию только показывает разобранное: цифры набираются руками, и
+    увидеть, что понял импорт, надо ДО того, как оно попадёт в дневник.
+    """
+    from . import mt5
+
+    text = Path(args.file).read_text(encoding="utf-8")
+    rows, problems = mt5.parse(text)
+
+    for complaint in problems:
+        print(f"  ПРОПУЩЕНА {complaint}", file=sys.stderr)
+    if not rows:
+        print("Ни одной строки разобрать не удалось.", file=sys.stderr)
+        return 7
+
+    print(f"Разобрано строк: {len(rows)}")
+    for row in sorted(rows, key=lambda r: r["closed_at"]):
+        closed = time.strftime("%Y-%m-%d %H:%M", time.gmtime(row["closed_at"] / 1000))
+        print(f"  {closed}  {row['symbol']:<10} {row['direction']:<5}"
+              f" {row['lots']:>6} лот  {row['open_price']:>9} -> {row['close_price']:<9}"
+              f" итог {row['net_pnl']:>9}"
+              + (f"  [{row['comment']}]" if row["comment"] else ""))
+
+    # Размер контракта — единственная доступная проверка ввода: у одного
+    # инструмента он один. Два значения по символу означают опечатку в цене,
+    # объёме или P&L, и лучше увидеть это здесь, чем потом в кривой эквити.
+    print("\nЕдиниц в лоте (выведено из строк, должно быть по одному на инструмент):")
+    suspicious = False
+    for symbol, sizes in sorted(mt5.contract_sizes(rows).items()):
+        # normalize + f: Decimal('1E+1') иначе печатается как «1e+1».
+        values = ", ".join(f"{size.normalize():f}" for size in sizes)
+        flag = "" if len(sizes) <= 1 else "   <- РАЗНЫЕ ЗНАЧЕНИЯ, проверь строки"
+        suspicious = suspicious or len(sizes) > 1
+        print(f"  {symbol:<10} {values}{flag}")
+
+    if not args.write:
+        print("\nЭто сухой прогон. Записать: добавь --write")
+        return 0
+    if suspicious and not args.force:
+        print("\nОТКАЗ: у инструмента получилось несколько размеров контракта —"
+              " значит какая-то строка прочитана неверно.\n"
+              "  Проверь её или настаивай через --force.", file=sys.stderr)
+        return 8
+
+    conn = db.connect()
+    saved = db.save_mt5_positions(conn, rows)
+    # Инструменты MT5 биржевого справочника не знают: их класс проставляется
+    # здесь, иначе сделки уехали бы в крипту (незнакомый символ = крипта).
+    db.save_symbols(conn, [{"symbol": row["symbol"], "symbolType": MT5_SYMBOL_TYPE}
+                           for row in rows])
+    # Именно rebuild_all: одна склейка стёрла бы комиссию в MNT и плечо, и
+    # дневник остался бы с заниженным P&L до следующего круга синка.
+    stats = roundtrips.rebuild_all(conn)
+    print(f"\nЗаписано позиций: {saved}. Сделок в дневнике: {stats['round_trips']}"
+          f" (из них с MT5: {stats['mt5']})")
+    print("Эти сделки в сверку не входят: второго источника по ним нет.")
     return 0
 
 
@@ -287,6 +390,19 @@ def main() -> int:
     intent.add_argument("--target", help="план выхода")
     intent.add_argument("--tags", help="теги через запятую")
     intent.set_defaults(func=cmd_intent)
+
+    mt5 = sub.add_parser(
+        "mt5-import",
+        help="внести закрытые позиции с MT5 (Bybit TradFi CFD) из текстового файла",
+        description="Одна сделка на строку, колонки в порядке таблицы истории"
+                    " веб-трейдера, разделитель — табуляция. По умолчанию только"
+                    " показывает разобранное.")
+    mt5.add_argument("file")
+    mt5.add_argument("--write", action="store_true",
+                     help="действительно записать в дневник")
+    mt5.add_argument("--force", action="store_true",
+                     help="записать, даже если размеры контракта разошлись")
+    mt5.set_defaults(func=cmd_mt5_import)
 
     note = sub.add_parser("note", help="разбор после закрытия")
     note.add_argument("trade_id")

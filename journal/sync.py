@@ -27,15 +27,24 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import db, journal, reconcile, roundtrips
+from . import db, roundtrips
 
 # Данные биржи: едут только с Мака, на сервере лишь дополняются.
 TRADE_TABLES = ("raw_executions", "exchange_pnl")
-# Снимок текущего состояния биржи: заменяется целиком, а не дополняется.
-# Закрытая позиция обязана исчезнуть — тумбстоны здесь были бы призраками
-# с «текущим» P&L недельной давности. Правило «ничего не удаляем» — про
-# журнал, который пишет человек, и на снимок не распространяется.
-SNAPSHOT_TABLES = ("open_positions",)
+# Снимки состояния биржи: заменяются целиком, а не дополняются. Закрытая
+# позиция обязана исчезнуть — тумбстоны здесь были бы призраками с «текущим»
+# P&L недельной давности. Правило «ничего не удаляем» — про журнал, который
+# пишет человек, и на снимки не распространяется.
+#
+# Справочник инструментов здесь же, хотя и не сиюминутен: на биржу ходит только
+# мак, поэтому его версия авторитетна целиком, а дописывание оставило бы на
+# сервере устаревший класс актива после переклассификации.
+#
+# Сделки с MT5 здесь же, и по той же причине: вводят и правят их только на
+# маке (команда `mt5-import`), поэтому его версия авторитетна целиком.
+# Дописывание не донесло бы до сервера исправленную опечатку — а при ручном
+# вводе исправление опечатки и есть основной способ правки.
+SNAPSHOT_TABLES = ("open_positions", "symbols", "mt5_positions")
 # Журнал: ездит в обе стороны, побеждает более свежая правка.
 JOURNAL_TABLES = ("notes", "rules", "rule_violations", "reasons", "trade_reasons")
 # Намерение правкам не подлежит по замыслу (иммутабельность — вся его ценность),
@@ -185,15 +194,13 @@ def merge(conn: sqlite3.Connection, path: Path) -> dict:
         conn.execute("DETACH DATABASE src")
 
     # Производные пересобираются здесь же: без этого сервер отдавал бы старые
-    # сделки при свежих fills.
-    stats = roundtrips.rebuild(conn)
-    fees = reconcile.apply_exchange_fees(conn)
-    reconcile.apply_leverage(conn)      # пересборка обнуляет плечо, оно из биржи
-    matched = journal.match_intents(conn)
+    # сделки при свежих fills. Целиком, а не одной склейкой — она стирает
+    # комиссию в MNT и плечо (см. roundtrips.rebuild_all).
+    stats = roundtrips.rebuild_all(conn)
     return {
         "added": added,
         "round_trips": stats["round_trips"],
-        "fees_from_exchange": fees["patched"],
-        "intents_matched": matched["matched"],
+        "fees_from_exchange": stats["fees"]["patched"],
+        "intents_matched": stats["intents"]["matched"],
         "orphan_funding": len(stats["orphan_funding"]),
     }

@@ -206,10 +206,8 @@ def _trades_page(conn, days: int, offset: int, limit: int):
         f" FROM round_trips WHERE {where}", params
     ).fetchone()
     rows = conn.execute(
-        "SELECT rt.*, (n.trade_id IS NOT NULL OR i.intent_id IS NOT NULL) AS annotated"
+        f"SELECT rt.*, {journal.reviewed_sql('rt')} AS annotated"
         " FROM round_trips rt"
-        " LEFT JOIN notes n ON n.trade_id = rt.trade_id AND n.body <> ''"
-        " LEFT JOIN intents i ON i.matched_trade_id = rt.trade_id"
         f" WHERE rt.{where} ORDER BY rt.closed_at DESC LIMIT ? OFFSET ?",
         params + (limit, offset),
     ).fetchall()

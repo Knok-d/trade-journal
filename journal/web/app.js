@@ -3,8 +3,13 @@
 
 "use strict";
 
-const state = { days: 0, from: null, to: null, pendingOnly: false,
+const state = { days: 0, from: null, to: null, asset: "", pendingOnly: false,
                 series: null, tags: { rule: [], reason: [] } };
+
+/* Как показывать класс актива. Крипта молчит: её девять десятых, и подпись на
+   каждой строке была бы шумом, а не сведением. */
+const ASSET_LABEL = { stock: "акция", commodity: "товар", forex: "форекс",
+                      cfd: "CFD" };
 
 /* ---------- утилиты ---------- */
 
@@ -713,6 +718,11 @@ function markGroup(kind, trade, title) {
         trade[field] = check.checked
           ? trade[field].concat(tag.id)
           : trade[field].filter((id) => id !== tag.id);
+        // Основание само по себе делает сделку разобранной, поэтому бейдж
+        // обязан ответить сразу — иначе отметка выглядит не сработавшей.
+        trade.reviewed = Boolean(
+          trade.note || trade.has_intent || trade.reasons.length);
+        refreshRowBadge(trade);
         loadSummary().catch(showError);
       } catch (err) {
         check.checked = !check.checked;   // не притворяемся, что сохранилось
@@ -735,11 +745,24 @@ function detailRow(t) {
   const grid = el("div", "detail-grid");
 
   grid.append(el("div", "detail-meta",
-    "объём " + t.qty + " · комиссия " + t.fees.toFixed(2) +
+    // У открытой сделки даты закрытия нет, а знать, сколько она уже висит,
+    // нужно именно сейчас — поэтому у неё в шапке стоит дата входа.
+    (t.closed_at === null ? "открыта " + fmtDate(t.opened_at) + " · " : "") +
+    "объём " + t.qty + (t.source === "mt5" ? " лот" : "") +
+    " · комиссия " + t.fees.toFixed(2) +
     " · фандинг " + fmtUsd(t.funding) +
     (t.fees_source === "exchange" ? " · комиссия от биржи (MNT)" : "") +
     (t.liquidated ? " · ЛИКВИДАЦИЯ" : "")
   ));
+
+  // Происхождение цифр — не мелочь: по всем остальным сделкам сверка с биржей
+  // прошла посделочно, а по этим сравнивать не с чем. Молчание здесь читалось
+  // бы как «проверено», и это была бы неправда.
+  if (t.source === "mt5") {
+    grid.append(el("div", "detail-meta warn",
+      "Сделка с MT5: цифры пришли от брокера и в сверку не входят —" +
+      " второго источника по ним нет."));
+  }
 
   if (t.has_intent) {
     const box = el("div", "intent-box");
@@ -757,7 +780,11 @@ function detailRow(t) {
   if (broken) grid.append(broken);
 
   const editor = el("div", "note-editor");
-  const label = el("label", null, "Почему заходил, что увидел, что пошло не так:");
+  // Вопрос по открытой позиции другой: «что пошло не так» ещё не случилось,
+  // а план выхода — единственное, что сейчас имеет смысл записать.
+  const label = el("label", null, t.closed_at === null
+    ? "Почему в позиции, чего ждёшь, где выйдешь:"
+    : "Почему заходил, что увидел, что пошло не так:");
   label.htmlFor = "note-" + t.trade_id;
   const area = el("textarea");
   area.id = "note-" + t.trade_id;
@@ -776,6 +803,10 @@ function detailRow(t) {
     try {
       await postJSON("/api/note", { trade_id: t.trade_id, body: area.value });
       t.note = area.value.trim() || null;
+      // Тот же признак, что считает сервер, но по свежему факту: только что
+      // сохранённый текст написан до закрытия ровно тогда, когда сделка ещё
+      // открыта. Перечитывать ради этого всю таблицу было бы дороже.
+      t.note_before_close = t.note !== null && t.closed_at === null;
       status.textContent = t.note ? "сохранено" : "очищено";
       // KPI зависят и от summary, поэтому дешевле перечитать сводку целиком,
       // чем точечно править карточку разобранности.
@@ -794,8 +825,17 @@ function detailRow(t) {
 }
 
 function badgeFor(t) {
-  if (t.note) return el("span", "badge noted", "разобрана");
+  // «До закрытия» — разбор, написанный, когда исход ещё не был известен.
+  // Метка живёт ровно до правки после выхода и гаснет сама: запрещать правку
+  // незачем, а выдавать поздний текст за ранний нельзя.
+  if (t.note) {
+    return el("span", "badge noted" + (t.note_before_close ? " early" : ""),
+              t.note_before_close ? "разобрана до закрытия" : "разобрана");
+  }
   if (t.has_intent) return el("span", "badge intent", "план до входа");
+  // Разобранность решает сервер (journal.reviewed_sql). Досюда доходят
+  // сделки без текста и без намерения, то есть отмеченные одним основанием.
+  if (t.reviewed) return el("span", "badge noted", "основание");
   return el("span", "badge", "—");
 }
 
@@ -807,8 +847,11 @@ function refreshRowBadge(t) {
 function renderTrades(trades) {
   const body = document.getElementById("trades-body");
   body.replaceChildren();
-  document.getElementById("trades-count").textContent =
-    trades.length ? "закрытых: " + trades.length : "";
+  const openCount = trades.filter((t) => t.closed_at === null).length;
+  document.getElementById("trades-count").textContent = trades.length
+    ? "закрытых: " + (trades.length - openCount) +
+      (openCount ? " · в позиции: " + openCount : "")
+    : "";
 
   if (!trades.length) {
     const tr = el("tr");
@@ -821,10 +864,18 @@ function renderTrades(trades) {
   }
 
   for (const t of trades) {
-    const tr = el("tr", "trade");
+    const live = t.closed_at === null;
+    const tr = el("tr", live ? "trade live" : "trade");
 
-    tr.append(el("td", null, fmtDate(t.closed_at)));
-    tr.append(el("td", null, t.symbol));
+    tr.append(el("td", null, live ? "в позиции" : fmtDate(t.closed_at)));
+
+    // Класс актива подписью у символа, а не отдельной колонкой: колонка
+    // потребовала бы править colSpan раскрытой строки в двух местах.
+    const symbolCell = el("td", null, t.symbol);
+    if (ASSET_LABEL[t.asset_class]) {
+      symbolCell.append(el("span", "asset-tag", ASSET_LABEL[t.asset_class]));
+    }
+    tr.append(symbolCell);
     tr.append(el("td", "dir", t.direction));
     tr.append(el("td", "num", fmtPrice(t.avg_entry)));
     tr.append(el("td", "num", fmtPrice(t.avg_exit)));
@@ -869,10 +920,11 @@ function renderTrades(trades) {
 /* ---------- загрузка ---------- */
 
 function periodQuery() {
+  const asset = state.asset ? "&asset=" + state.asset : "";
   if (state.from !== null || state.to !== null) {
-    return "from=" + (state.from ?? "") + "&to=" + (state.to ?? "");
+    return "from=" + (state.from ?? "") + "&to=" + (state.to ?? "") + asset;
   }
-  return "days=" + state.days;
+  return "days=" + state.days + asset;
 }
 
 async function loadSummary() {
@@ -946,6 +998,19 @@ document.querySelectorAll(".periods button").forEach((btn) => {
     document.querySelectorAll(".periods button").forEach((b) =>
       b.removeAttribute("aria-current"));
     btn.setAttribute("aria-current", "true");
+    loadAll();
+  });
+});
+
+document.querySelectorAll(".assets button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.asset = btn.dataset.asset;
+    document.querySelectorAll(".assets button").forEach((b) =>
+      b.removeAttribute("aria-current"));
+    btn.setAttribute("aria-current", "true");
+    // Перезагружается всё: класс актива меняет и сводку, и графики, и таблицу.
+    // Перерисовать одну таблицу значило бы показать кривую крипты над списком
+    // сделок по золоту.
     loadAll();
   });
 });

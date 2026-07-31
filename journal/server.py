@@ -139,6 +139,15 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return 0
 
+    def _asset(self) -> str | None:
+        """Класс актива из query-строки. Незнакомое значение = без отбора.
+
+        Молча показать всё честнее, чем показать пусто: пустой дневник читается
+        как «сделок нет», а не как «в адресе опечатка».
+        """
+        asset = self._query().get("asset", [""])[0]
+        return asset if asset in ("crypto", "tradfi") else None
+
     def _range(self) -> tuple[int | None, int | None]:
         """Произвольный отрезок в миллисекундах. Пусто — значит период из days."""
         def bound(name):
@@ -202,7 +211,10 @@ class Handler(BaseHTTPRequestHandler):
     def _api_summary(self):
         days = self._days()
         since, until = self._range()
-        bounds = {"since": since, "until": until}
+        # Класс актива едет вместе с границами периода: у всех функций
+        # статистики он такой же именованный параметр, и держать его отдельно
+        # значило бы забыть про него ровно в одной из десяти строк ниже.
+        bounds = {"since": since, "until": until, "asset": self._asset()}
         conn = db.connect(self.db_path)
         try:
             overall = stats.summary(conn, days, **bounds)
@@ -232,33 +244,55 @@ class Handler(BaseHTTPRequestHandler):
         pending_only = self._query().get("pending", ["0"])[0] == "1"
         conn = db.connect(self.db_path)
         try:
-            where, params = "rt.closed_at IS NOT NULL", []
+            period, params = "", []
             # Границы, если заданы, главнее относительного периода — так же,
             # как в stats._closed, иначе таблица и сводка разошлись бы.
             if since is not None or until is not None:
                 if since is not None:
-                    where += " AND rt.closed_at >= ?"
+                    period += " AND rt.closed_at >= ?"
                     params.append(since)
                 if until is not None:
-                    where += " AND rt.closed_at <= ?"
+                    period += " AND rt.closed_at <= ?"
                     params.append(until)
             elif days:
-                where += (" AND rt.closed_at >="
-                          " (SELECT MAX(closed_at) FROM round_trips) - ?")
+                period += (" AND rt.closed_at >="
+                           " (SELECT MAX(closed_at) FROM round_trips) - ?")
                 params.append(days * stats.DAY_MS)
+
+            # Период применяется только к закрытым. Открытая позиция видна
+            # всегда: открытая в июне и живая сегодня, она пропадала бы при
+            # выборе «за неделю» — а разобрать надо именно её, пока не поздно.
+            where = f"(rt.closed_at IS NULL OR (rt.closed_at IS NOT NULL{period}))"
+            where += db.asset_filter(self._asset())
             if pending_only:
-                where += (" AND n.body IS NULL AND i.intent_id IS NULL")
+                where += f" AND NOT {journal.reviewed_sql('rt')}"
             rows = conn.execute(
                 "SELECT rt.trade_id, rt.symbol, rt.direction, rt.qty, rt.avg_entry,"
                 "       rt.avg_exit, rt.gross_pnl, rt.fees, rt.funding, rt.net_pnl,"
                 "       rt.opened_at, rt.closed_at, rt.liquidated, rt.fees_source,"
+                "       rt.source,"
                 "       rt.leverage, rt.entry_value,"
                 "       n.body AS note, i.intent_id, i.thesis, i.planned_stop,"
-                "       i.match_note"
+                "       i.match_note,"
+                f"      {db.ASSET_CLASS_SQL} AS asset_class,"
+                # Разобранность считает SQL, а не JS: определение одно на весь
+                # проект (journal.reviewed_sql), и вторая копия в браузере
+                # разошлась бы с ним незаметно — обе выглядели бы исправными.
+                f"      {journal.reviewed_sql('rt')} AS reviewed,"
+                # Разбор, написанный до того, как стал известен исход. Считается
+                # здесь, а не в JS: правило одно, а оболочек две, и вторая копия
+                # разъехалась бы с первой на первой же правке.
+                "       CASE WHEN n.body IS NULL THEN 0"
+                "            WHEN rt.closed_at IS NULL THEN 1"
+                "            WHEN n.updated_at < rt.closed_at THEN 1"
+                "            ELSE 0 END AS note_before_close"
                 " FROM round_trips rt"
                 " LEFT JOIN notes n ON n.trade_id = rt.trade_id AND n.body <> ''"
                 " LEFT JOIN intents i ON i.matched_trade_id = rt.trade_id"
-                f" WHERE {where} ORDER BY rt.closed_at DESC",
+                " LEFT JOIN symbols s ON s.symbol = rt.symbol"
+                f" WHERE {where}"
+                " ORDER BY rt.closed_at IS NULL DESC,"
+                "          COALESCE(rt.closed_at, rt.opened_at) DESC",
                 params,
             ).fetchall()
             broken = journal.marks_by_trade(conn, "rule")
@@ -280,6 +314,10 @@ class Handler(BaseHTTPRequestHandler):
                     "opened_at": r["opened_at"],
                     "closed_at": r["closed_at"],
                     "liquidated": bool(r["liquidated"]),
+                    "asset_class": r["asset_class"],
+                    "source": r["source"],
+                    "reviewed": bool(r["reviewed"]),
+                    "note_before_close": bool(r["note_before_close"]),
                     "fees_source": r["fees_source"],
                     "leverage": float(db.dec(r["leverage"])) if r["leverage"] else None,
                     "roi": stats.roi(r["net_pnl"], r["entry_value"], r["leverage"]),

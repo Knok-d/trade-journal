@@ -4,8 +4,17 @@
 "use strict";
 
 const tg = window.Telegram && window.Telegram.WebApp;
-const state = { days: 30, pendingOnly: false, limit: 20, initData: "",
+const state = { days: 30, asset: "", pendingOnly: false, limit: 20, initData: "",
                 tags: { rule: [], reason: [] } };
+
+/* Класс актива подписью. Крипта молчит: её девять десятых, и метка на каждой
+   строке была бы шумом. */
+const ASSET_LABEL = { stock: "акция", commodity: "товар", forex: "форекс",
+                      cfd: "CFD" };
+
+function periodQuery() {
+  return "days=" + state.days + (state.asset ? "&asset=" + state.asset : "");
+}
 
 /* ---------- утилиты ---------- */
 
@@ -230,7 +239,9 @@ function editor(trade, row) {
   const wrap = el("div", "editor");
   const area = el("textarea");
   area.value = trade.note || "";
-  area.placeholder = "Почему заходил, что увидел, что пошло не так";
+  area.placeholder = trade.closed_at === null
+    ? "Почему в позиции, чего ждёшь, где выйдешь"
+    : "Почему заходил, что увидел, что пошло не так";
   wrap.append(area);
 
   for (const [kind, title] of [["reason", "На чём заходил:"],
@@ -258,6 +269,11 @@ function editor(trade, row) {
           trade[field] = check.checked
             ? trade[field].concat(tag.id)
             : trade[field].filter((id) => id !== tag.id);
+          // Основание само по себе делает сделку разобранной — отметка в
+          // списке обязана появиться сразу, иначе выглядит не сработавшей.
+          trade.reviewed = Boolean(
+            trade.note || trade.has_intent || trade.reasons.length);
+          row.querySelector(".mark").textContent = markOf(trade);
           haptic("success");
           loadSummary().catch(() => {});
         } catch (err) {
@@ -276,8 +292,14 @@ function editor(trade, row) {
   if (trade.has_intent) {
     wrap.append(el("div", "hint", "План до входа: " + (trade.thesis || "")));
   }
-  wrap.append(el("div", "hint",
-    "Запись после результата — это память под исход, а не оценка решения."));
+  // Молчание здесь читалось бы как «сверено», а сверять эти сделки не с чем.
+  if (trade.source === "mt5") {
+    wrap.append(el("div", "hint",
+      "Сделка с MT5: цифры от брокера, в сверку не входят."));
+  }
+  wrap.append(el("div", "hint", trade.closed_at === null
+    ? "Исход ещё не известен — записанное сейчас будет решением, а не памятью о нём."
+    : "Запись после результата — это память под исход, а не оценка решения."));
 
   const save = el("button", null, "Сохранить разбор");
   save.type = "button";
@@ -294,9 +316,15 @@ function editor(trade, row) {
         body: JSON.stringify({ trade_id: trade.trade_id, body: area.value }),
       });
       trade.note = area.value.trim() || null;
+      // Тот же признак, что считает сервер: только что сохранённый текст
+      // написан до исхода ровно тогда, когда сделка ещё открыта.
+      trade.note_before_close = trade.note !== null && trade.closed_at === null;
       status.textContent = trade.note ? "сохранено" : "очищено";
       haptic("success");
-      row.querySelector(".mark").textContent = trade.note ? "📝" : "";
+      trade.reviewed = Boolean(
+        trade.note || trade.has_intent || trade.reasons.length);
+      row.querySelector(".mark").textContent = markOf(trade);
+      row.querySelector(".meta").textContent = tradeMeta(trade);
       loadSummary().catch(() => {});
     } catch (err) {
       status.textContent = "не сохранилось: " + err.message;
@@ -308,17 +336,36 @@ function editor(trade, row) {
   return wrap;
 }
 
+/* Отметка разобранности в списке. Основание без текста — тоже разбор,
+   но отличать его от написанного стоит: 📝 против галочки. */
+function markOf(trade) {
+  if (trade.note) return "📝";
+  return trade.reviewed ? "✓" : "";
+}
+
+function tradeMeta(trade) {
+  // У открытой позиции даты закрытия нет, а «сколько уже вишу» — как раз то,
+  // что нужно знать, пока пишешь разбор.
+  return (trade.closed_at === null
+    ? "в позиции с " + fmt.date(trade.opened_at)
+    : fmt.date(trade.closed_at)) +
+    (trade.leverage ? " · " + trade.leverage + "×" : "") +
+    (trade.note_before_close ? " · разбор до закрытия" : "");
+}
+
 function tradeRow(trade) {
-  const row = el("div", "row tappable");
+  const row = el("div", "row tappable" + (trade.closed_at === null ? " live" : ""));
   const left = el("div", "grow");
   const head = el("div");
   head.append(el("span", "sym", fmt.sym(trade.symbol)));
   head.append(el("span", "dir", " " + (trade.direction === "long" ? "▲" : "▼")));
+  if (ASSET_LABEL[trade.asset_class]) {
+    head.append(el("span", "asset-tag", ASSET_LABEL[trade.asset_class]));
+  }
   left.append(head);
-  left.append(el("div", "meta", fmt.date(trade.closed_at) +
-    (trade.leverage ? " · " + trade.leverage + "×" : "")));
+  left.append(el("div", "meta", tradeMeta(trade)));
   row.append(left);
-  row.append(el("div", "mark", trade.note ? "📝" : ""));
+  row.append(el("div", "mark", markOf(trade)));
   const money = el("div", "num " + cls(trade.net_pnl));
   money.append(el("div", null, fmt.usd(trade.net_pnl)));
   // Прочерк, а не 0%: без плеча и объёма входа от биржи знаменателя нет.
@@ -359,7 +406,7 @@ function renderTrades(trades) {
 let lastTrades = [];
 
 async function loadSummary() {
-  const data = await api("/api/summary?days=" + state.days);
+  const data = await api("/api/summary?" + periodQuery());
   renderFreshness(data.freshness);
   renderOpen(data.open);
   renderHero(data.summary, data.sample_note);
@@ -378,7 +425,7 @@ async function loadTags() {
 
 async function loadTrades() {
   const data = await api(
-    "/api/trades?days=" + state.days + "&pending=" + (state.pendingOnly ? 1 : 0));
+    "/api/trades?" + periodQuery() + "&pending=" + (state.pendingOnly ? 1 : 0));
   lastTrades = data.trades;
   renderTrades(lastTrades);
 }
@@ -408,6 +455,17 @@ document.querySelectorAll(".periods button").forEach((btn) => {
     state.days = Number(btn.dataset.days);
     state.limit = 20;
     document.querySelectorAll(".periods button").forEach(
+      (b) => b.removeAttribute("aria-current"));
+    btn.setAttribute("aria-current", "true");
+    loadAll();
+  });
+});
+
+document.querySelectorAll(".assets button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.asset = btn.dataset.asset;
+    state.limit = 20;
+    document.querySelectorAll(".assets button").forEach(
       (b) => b.removeAttribute("aria-current"));
     btn.setAttribute("aria-current", "true");
     loadAll();
