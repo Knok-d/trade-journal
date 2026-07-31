@@ -106,6 +106,43 @@ def _closed(conn: sqlite3.Connection, days: int = 0, *,
     return conn.execute(query + " ORDER BY rt.closed_at", params).fetchall()
 
 
+def trade_scope(days: int = 0, *, since: int | None = None,
+                until: int | None = None,
+                asset: str | None = None) -> tuple[str, list]:
+    """Условие «сделка попадает в то, что сейчас показано»: закрыта внутри
+    периода ЛИБО ещё открыта, нужного класса актива.
+
+    Одно на таблицу сделок и на плашку разобранности. Раньше плашка считала по
+    всему дневнику независимо от выбранного периода и класса — и показывала
+    «10 / 177» под таблицей из двадцати строк. Считать не то, что показано, —
+    ровно тот вид неточности, который замечают последним.
+
+    Открытая сделка периоду не подчиняется: открытая в июне и живая сегодня,
+    она пропадала бы при выборе «за неделю», а разобрать надо именно её.
+
+    В отличие от `_closed`, здесь есть открытые сделки: статистика считается по
+    закрытым (у открытой нет итога), а разобранность — по всем, потому что
+    разбор пишется и на живой позиции.
+
+    Запрос обязан назвать round_trips как `rt` и присоединить справочник
+    инструментов как `s` — этого требует отбор по классу актива.
+    """
+    period, params = "", []
+    if since is not None or until is not None:
+        if since is not None:
+            period += " AND rt.closed_at >= ?"
+            params.append(since)
+        if until is not None:
+            period += " AND rt.closed_at <= ?"
+            params.append(until)
+    elif days:
+        period += (" AND rt.closed_at >="
+                   " (SELECT MAX(closed_at) FROM round_trips) - ?")
+        params.append(days * DAY_MS)
+    where = f"(rt.closed_at IS NULL OR (rt.closed_at IS NOT NULL{period}))"
+    return where + asset_filter(asset), params
+
+
 def wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     """Интервал Уилсона для доли — честнее нормального приближения на малых n."""
     if n == 0:

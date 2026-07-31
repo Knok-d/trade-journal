@@ -330,6 +330,35 @@ class OpenTradeAndAssetTest(unittest.TestCase):
         finally:
             self._set_closed_at(200 * HOUR)
 
+    def _summary(self, query=""):
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/summary{query}") as r:
+            return json.loads(r.read())
+
+    def test_coverage_counts_exactly_what_the_table_shows(self):
+        """Плашка «Разобрано» обязана считать по тем же сделкам, что под ней.
+
+        Раньше она была на весь дневник: при выбранном TradFi показывала счёт
+        по всем сделкам сразу, и «10 / 177» стояло над таблицей из двух строк.
+        """
+        for query in ("?days=0", "?days=0&asset=tradfi", "?days=0&asset=crypto",
+                      "?days=1", "?from=%d&to=%d" % (198 * HOUR, 201 * HOUR)):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self._summary(query)["coverage"]["trades"],
+                    len(self._trades(query)),
+                    "знаменатель плашки разошёлся с таблицей",
+                )
+
+    def test_coverage_follows_the_asset_filter(self):
+        self.assertEqual(self._summary("?days=0&asset=tradfi")["coverage"]["trades"], 1)
+        self.assertEqual(self._summary("?days=0&asset=crypto")["coverage"]["trades"], 1)
+        self.assertEqual(self._summary("?days=0")["coverage"]["trades"], 2)
+
+    def test_open_trade_stays_in_the_denominator_of_a_narrow_period(self):
+        """Разбор пишется и на живой позиции, значит она входит в разобранность."""
+        self.assertEqual(self._summary("?days=1")["coverage"]["trades"], 2)
+
     def test_asset_filter_splits_without_losing_anything(self):
         everything = self._trades("?days=0")
         crypto = self._trades("?days=0&asset=crypto")

@@ -254,15 +254,18 @@ def cmd_note(args) -> int:
 
 def cmd_coverage(args) -> int:
     conn = db.connect()
-    since = 0 if not args.days else int(time.time() * 1000) - args.days * DAY_MS
-    stats = journal.coverage(conn, since)
+    # Период отсчитывается от последней сделки, а не от сегодня — как и везде
+    # в проекте: неделя без торговли иначе давала бы пустой отчёт, что
+    # читается как поломка.
+    stats = journal.coverage(conn, args.days)
 
     if not stats["trades"]:
         print("Сделок за период нет.")
         return 0
 
     print(f"Сделок: {stats['trades']}")
-    print(f"Разобрано (заметка или намерение): {stats['annotated']} ({stats['share']:.0%})")
+    print(f"Разобрано (заметка, намерение или основание):"
+          f" {stats['annotated']} ({stats['share']:.0%})")
     print(f"  из них с намерением до входа: {stats['with_intent']}")
     print(f"  с плановым стопом: {stats['with_planned_stop']}")
     print(f"Без разбора: {stats['missing']}")

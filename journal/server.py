@@ -225,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
                 "r": {key: value
                       for key, value in stats.r_multiples(conn, days, **bounds).items()
                       if key != "values"},
-                "coverage": journal.coverage(conn),
+                "coverage": journal.coverage(conn, days, **bounds),
                 "freshness": stats.freshness(conn),
                 "rules": stats.tag_stats(conn, "rule", days, **bounds),
                 "reasons": stats.tag_stats(conn, "reason", days, **bounds),
@@ -244,26 +244,10 @@ class Handler(BaseHTTPRequestHandler):
         pending_only = self._query().get("pending", ["0"])[0] == "1"
         conn = db.connect(self.db_path)
         try:
-            period, params = "", []
-            # Границы, если заданы, главнее относительного периода — так же,
-            # как в stats._closed, иначе таблица и сводка разошлись бы.
-            if since is not None or until is not None:
-                if since is not None:
-                    period += " AND rt.closed_at >= ?"
-                    params.append(since)
-                if until is not None:
-                    period += " AND rt.closed_at <= ?"
-                    params.append(until)
-            elif days:
-                period += (" AND rt.closed_at >="
-                           " (SELECT MAX(closed_at) FROM round_trips) - ?")
-                params.append(days * stats.DAY_MS)
-
-            # Период применяется только к закрытым. Открытая позиция видна
-            # всегда: открытая в июне и живая сегодня, она пропадала бы при
-            # выборе «за неделю» — а разобрать надо именно её, пока не поздно.
-            where = f"(rt.closed_at IS NULL OR (rt.closed_at IS NOT NULL{period}))"
-            where += db.asset_filter(self._asset())
+            # То же условие, что считает плашку разобранности: одна формулировка
+            # на оба места, иначе плашка показывала бы счёт не по этой таблице.
+            where, params = stats.trade_scope(
+                days, since=since, until=until, asset=self._asset())
             if pending_only:
                 where += f" AND NOT {journal.reviewed_sql('rt')}"
             rows = conn.execute(

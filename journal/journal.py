@@ -111,34 +111,42 @@ def reviewed_sql(alias: str = "") -> str:
     )
 
 
-def coverage(conn: sqlite3.Connection, since_ms: int = 0) -> dict:
+def coverage(conn: sqlite3.Connection, days: int = 0, *,
+             since: int | None = None, until: int | None = None,
+             asset: str | None = None) -> dict:
     """Разобранность сделок — заголовочная метрика продукта (решение C).
 
     «Разобрана» — см. `reviewed_sql`: заметка постфактум (основной режим),
     намерение до входа (высший тир) или проставленное основание. Pre-trade
     считается отдельно как подпоказатель — разрыв между ними и есть
     измеритель рационализации, а не повод бить по рукам.
+
+    Период и класс актива — те же, что у таблицы сделок, и ровно теми же
+    словами (`stats.trade_scope`): плашка обязана считать то, что показано под
+    ней. Без аргументов — по всему дневнику, как и было.
     """
-    total = conn.execute(
-        "SELECT COUNT(*) c FROM round_trips WHERE opened_at >= ?", (since_ms,)
-    ).fetchone()["c"]
-    annotated = conn.execute(
-        "SELECT COUNT(*) c FROM round_trips rt"
-        f" WHERE rt.opened_at >= ? AND {reviewed_sql('rt')}",
-        (since_ms,),
-    ).fetchone()["c"]
-    with_intent = conn.execute(
-        "SELECT COUNT(*) c FROM round_trips rt"
-        " WHERE rt.opened_at >= ? AND rt.trade_id IN"
-        "   (SELECT matched_trade_id FROM intents WHERE matched_trade_id IS NOT NULL)",
-        (since_ms,),
-    ).fetchone()["c"]
-    with_stop = conn.execute(
-        "SELECT COUNT(*) c FROM round_trips rt JOIN intents i"
-        "   ON i.matched_trade_id = rt.trade_id"
-        " WHERE rt.opened_at >= ? AND i.planned_stop IS NOT NULL",
-        (since_ms,),
-    ).fetchone()["c"]
+    from .stats import trade_scope
+
+    where, params = trade_scope(days, since=since, until=until, asset=asset)
+    scope = (" FROM round_trips rt"
+             " LEFT JOIN symbols s ON s.symbol = rt.symbol"
+             f" WHERE {where}")
+
+    def count(extra: str = "") -> int:
+        return conn.execute(f"SELECT COUNT(*) c{scope}{extra}", params).fetchone()["c"]
+
+    total = count()
+    annotated = count(f" AND {reviewed_sql('rt')}")
+    # Намерение и плановый стоп — подзапросами, а не JOIN: у сделки может быть
+    # только одно намерение, но JOIN всё равно требовал бы своего условия
+    # периода, и оно разъехалось бы с общим.
+    with_intent = count(
+        " AND rt.trade_id IN (SELECT matched_trade_id FROM intents"
+        "                     WHERE matched_trade_id IS NOT NULL)")
+    with_stop = count(
+        " AND rt.trade_id IN (SELECT matched_trade_id FROM intents"
+        "                     WHERE matched_trade_id IS NOT NULL"
+        "                       AND planned_stop IS NOT NULL)")
 
     return {
         "trades": total,
