@@ -148,6 +148,29 @@ class Handler(BaseHTTPRequestHandler):
         asset = self._query().get("asset", [""])[0]
         return asset if asset in ("crypto", "tradfi") else None
 
+    # Порядок строк в таблице сделок. Ключи приходят от интерфейса, а SQL берётся
+    # отсюда: подставлять присланное в ORDER BY нельзя ни при каких проверках.
+    #
+    # `net_pnl` хранится текстом (Decimal), поэтому CAST обязателен. Ломается
+    # при этом не убыток, а прибыль: у отрицательных чисел лексический порядок
+    # случайно совпадает с числовым («-58» < «-9» и как строки, и как числа), а
+    # у положительных нет — строкой «9» больше «100», и лучшей сделкой периода
+    # объявлялась бы девятидолларовая вместо стодолларовой.
+    #
+    # В сортировке по деньгам открытые сделки уходят вниз (`net_pnl IS NULL`
+    # первым ключом): итога у них нет, и держать их сверху значило бы отвечать
+    # прочерком на вопрос «где мой лучший результат». В порядке по времени они,
+    # наоборот, закреплены сверху — там они самые важные.
+    ORDERS = {
+        "date": ("rt.closed_at IS NULL DESC,"
+                 " COALESCE(rt.closed_at, rt.opened_at) DESC"),
+        "profit": "rt.net_pnl IS NULL, CAST(rt.net_pnl AS REAL) DESC",
+        "loss": "rt.net_pnl IS NULL, CAST(rt.net_pnl AS REAL) ASC",
+    }
+
+    def _order(self) -> str:
+        return self.ORDERS.get(self._query().get("sort", [""])[0], self.ORDERS["date"])
+
     def _range(self) -> tuple[int | None, int | None]:
         """Произвольный отрезок в миллисекундах. Пусто — значит период из days."""
         def bound(name):
@@ -225,7 +248,9 @@ class Handler(BaseHTTPRequestHandler):
                 "r": {key: value
                       for key, value in stats.r_multiples(conn, days, **bounds).items()
                       if key != "values"},
-                "coverage": journal.coverage(conn, days, **bounds),
+                # Разобранность из дашборда убрана по просьбе владельца: цифра
+                # висела заголовочной и ни на что не влияла. Сама метрика жива
+                # и считается в `journal coverage`, отчёте и боте.
                 "freshness": stats.freshness(conn),
                 "rules": stats.tag_stats(conn, "rule", days, **bounds),
                 "reasons": stats.tag_stats(conn, "reason", days, **bounds),
@@ -241,15 +266,32 @@ class Handler(BaseHTTPRequestHandler):
     def _api_trades(self):
         days = self._days()
         since, until = self._range()
-        pending_only = self._query().get("pending", ["0"])[0] == "1"
+        query = self._query()
+        pending_only = query.get("pending", ["0"])[0] == "1"
         conn = db.connect(self.db_path)
         try:
-            # То же условие, что считает плашку разобранности: одна формулировка
-            # на оба места, иначе плашка показывала бы счёт не по этой таблице.
+            # То же условие, что и у остальных видов: одна формулировка на всех.
             where, params = stats.trade_scope(
                 days, since=since, until=until, asset=self._asset())
             if pending_only:
                 where += f" AND NOT {journal.reviewed_sql('rt')}"
+
+            # Поиск по тикеру. Подстрокой, а не по точному совпадению: набрать
+            # «btc» и получить BTCUSDT — то, чего ждёшь от поиска. LIKE у SQLite
+            # для латиницы регистронезависим, а тикеры латиницей и записаны.
+            if symbol := query.get("symbol", [""])[0].strip():
+                where += " AND rt.symbol LIKE ?"
+                params.append(f"%{symbol}%")
+
+            # Отбор по отметке: «покажи сделки, где я нарушил вот это правило».
+            # broken = 1 обязателен — снятая галочка остаётся строкой (журнал
+            # ездит в обе стороны, физически ничего не удаляется).
+            for kind, table, column in (("rule", "rule_violations", "rule_id"),
+                                        ("reason", "trade_reasons", "reason_id")):
+                if tag_id := query.get(kind, [""])[0].strip():
+                    where += (f" AND rt.trade_id IN (SELECT trade_id FROM {table}"
+                              f" WHERE {column} = ? AND broken = 1)")
+                    params.append(tag_id)
             rows = conn.execute(
                 "SELECT rt.trade_id, rt.symbol, rt.direction, rt.qty, rt.avg_entry,"
                 "       rt.avg_exit, rt.gross_pnl, rt.fees, rt.funding, rt.net_pnl,"
@@ -274,9 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                 " LEFT JOIN notes n ON n.trade_id = rt.trade_id AND n.body <> ''"
                 " LEFT JOIN intents i ON i.matched_trade_id = rt.trade_id"
                 " LEFT JOIN symbols s ON s.symbol = rt.symbol"
-                f" WHERE {where}"
-                " ORDER BY rt.closed_at IS NULL DESC,"
-                "          COALESCE(rt.closed_at, rt.opened_at) DESC",
+                f" WHERE {where} ORDER BY {self._order()}",
                 params,
             ).fetchall()
             broken = journal.marks_by_trade(conn, "rule")
@@ -428,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
             # синхронизируется в обе стороны, и удалённая строка вернулась бы
             # с другой стороны первым же кругом.
             journal.add_note(conn, trade_id, body.strip())
-            payload = {"ok": True, "coverage": journal.coverage(conn)}
+            payload = {"ok": True}
         finally:
             conn.close()
         self._json(payload)

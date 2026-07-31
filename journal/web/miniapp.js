@@ -128,10 +128,6 @@ function renderTiles(data) {
   box.replaceChildren();
   if (!s.n) return;
 
-  const cov = data.coverage;
-  box.append(tile("Разобрано", cov.annotated + " / " + cov.trades, "",
-    "с планом до входа: " + cov.with_intent));
-
   const [wlo, whi] = s.win_rate_ci;
   box.append(tile("Прибыльных", fmt.pct(s.win_rate), "",
     "95%: " + fmt.pct(wlo) + "–" + fmt.pct(whi)));

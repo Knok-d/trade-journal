@@ -25,10 +25,11 @@
       <button type="button" data-asset="tradfi">TradFi</button>
     </nav>
     <div class="dates">
-      <input type="date" id="date-from" aria-label="Начало периода">
-      <span class="dash">—</span>
-      <input type="date" id="date-to" aria-label="Конец периода">
+      <button type="button" id="dates-open" aria-haspopup="dialog"
+              aria-expanded="false">Свой отрезок</button>
       <button type="button" id="dates-clear" hidden>Сбросить</button>
+      <div class="calendar" id="calendar" role="dialog"
+           aria-label="Выбор отрезка дат" hidden></div>
     </div>
   </div>
 </header>
@@ -106,10 +107,20 @@
   <section class="panel" aria-labelledby="trades-h">
     <div class="table-head">
       <h2 id="trades-h">Сделки <span class="h-sub" id="trades-count"></span></h2>
-      <label class="pending-toggle">
-        <input type="checkbox" id="only-pending"> только без разбора
-      </label>
+      <div class="table-tools">
+        <input type="search" id="symbol-search" class="search"
+               placeholder="Тикер" aria-label="Поиск по тикеру" maxlength="20">
+        <nav class="sorts" aria-label="Порядок сделок">
+          <button type="button" data-sort="date" aria-current="true">По времени</button>
+          <button type="button" data-sort="profit">По профиту</button>
+          <button type="button" data-sort="loss">По убытку</button>
+        </nav>
+        <label class="pending-toggle">
+          <input type="checkbox" id="only-pending"> только без разбора
+        </label>
+      </div>
     </div>
+    <div class="tag-filter" id="tag-filter" hidden></div>
     <div class="table-wrap">
       <table id="trades-table">
         <thead>

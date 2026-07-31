@@ -4,6 +4,10 @@
 "use strict";
 
 const state = { days: 0, from: null, to: null, asset: "", pendingOnly: false,
+                // Отбор и порядок ТОЛЬКО для таблицы сделок: цифры и графики
+                // над ней остаются про весь период. Иначе поиск по тикеру
+                // молча превращал бы сводку в отчёт по одной монете.
+                symbol: "", sort: "date", tag: null,
                 series: null, tags: { rule: [], reason: [] } };
 
 /* Как показывать класс актива. Крипта молчит: её девять десятых, и подпись на
@@ -72,7 +76,7 @@ async function postJSON(url, payload) {
 /* ---------- KPI ---------- */
 
 function kpi(label, value, opts = {}) {
-  const card = el("div", "kpi" + (opts.headline ? " headline" : ""));
+  const card = el("div", "kpi");
   card.append(el("div", "label", label));
   const v = el("div", "value" + (opts.cls ? " " + opts.cls : ""), value);
   card.append(v);
@@ -123,16 +127,6 @@ function renderKpis(data) {
     return;
   }
 
-  const cov = data.coverage;
-  // Заголовочная метрика продукта (решение C) — разобранность, не P&L.
-  box.append(kpi(
-    "Разобрано сделок",
-    cov.annotated + " / " + cov.trades,
-    {
-      headline: true,
-      hint: "с намерением до входа: " + cov.with_intent,
-    }
-  ));
 
   // Матожидание на сделку убрано отдельной плашкой: это тот же итог, делённый
   // на число сделок. Ценным в ней был только интервал — накрывает он ноль или
@@ -641,6 +635,16 @@ function tagRow(kind, tag, measured) {
     if (measured.n && measured.total < 0) stat.classList.add("neg");
   }
 
+  // Клик по цифрам отбирает таблицу: «покажи те самые сделки» — первое, что
+  // хочется сделать, увидев «1 сдел. · +26.79». Кнопка, а не клик по строке:
+  // текст рядом правится на месте, и строка целиком кликаться не должна.
+  const pick = el("button", "rule-pick");
+  pick.type = "button";
+  pick.title = "Показать эти сделки";
+  pick.setAttribute("aria-label", "Показать сделки, где отмечено: " + tag.body);
+  pick.append(stat);
+  pick.addEventListener("click", () => selectTag({ kind, id: tag.id }));
+
   const archive = el("button", "rule-archive", tag.active ? "×" : "↩");
   archive.type = "button";
   archive.title = tag.active ? "В архив" : "Вернуть из архива";
@@ -649,7 +653,9 @@ function tagRow(kind, tag, measured) {
     saveTag(kind, { id: tag.id, active: !tag.active }).catch(showError);
   });
 
-  li.append(input, stat, archive);
+  li.dataset.tagId = tag.id;
+  if (state.tag !== null && state.tag.id === tag.id) li.classList.add("picked");
+  li.append(input, pick, archive);
   return li;
 }
 
@@ -945,10 +951,21 @@ async function loadTags() {
   state.tags = { rule: rules.tags, reason: reasons.tags };
 }
 
+// Фильтров у таблицы пять, и переключают их подряд, не дожидаясь ответа.
+// Без номера побеждал бы не последний ЗАПРОС, а последний ОТВЕТ: таблица
+// показывала бы отбор, который уже сняли, и выглядела бы при этом исправной.
+let tradesTicket = 0;
+
 async function loadTrades() {
-  const data = await getJSON(
-    "/api/trades?" + periodQuery() + "&pending=" + (state.pendingOnly ? 1 : 0));
-  renderTrades(data.trades);
+  const ticket = ++tradesTicket;
+  const extra = [
+    "pending=" + (state.pendingOnly ? 1 : 0),
+    "sort=" + state.sort,
+    state.symbol ? "symbol=" + encodeURIComponent(state.symbol) : "",
+    state.tag ? state.tag.kind + "=" + encodeURIComponent(state.tag.id) : "",
+  ].filter(Boolean).join("&");
+  const data = await getJSON("/api/trades?" + periodQuery() + "&" + extra);
+  if (ticket === tradesTicket) renderTrades(data.trades);
 }
 
 function loadAll() {
@@ -964,19 +981,117 @@ function showError(err) {
   box.replaceChildren(el("div", "empty", "Ошибка загрузки: " + err.message));
 }
 
-/* ---------- период ---------- */
+/* ---------- период: свой календарь ----------
 
-const dateFrom = document.getElementById("date-from");
-const dateTo = document.getElementById("date-to");
+   Своими руками, а не <input type="date">, ровно по одной причине: выпадающий
+   календарь у нативного поля — элемент браузера, и CSS до него не дотягивается
+   вообще. На тёмном дашборде он выглядел чужой заплаткой. Рисуем сами теми же
+   переменными, что и всё остальное; заодно отрезок выбирается двумя кликами по
+   одной сетке, а не двумя полями по очереди. */
+
+const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+                "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+const WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+const calendar = document.getElementById("calendar");
+const datesOpen = document.getElementById("dates-open");
 const datesClear = document.getElementById("dates-clear");
+let shownMonth = new Date();
+
+function endOfDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(),
+                  23, 59, 59, 999).getTime();
+}
+
+function pickDay(date) {
+  const start = date.getTime();
+  if (state.from === null || state.to !== null) {
+    state.from = start;          // новый отрезок: первый клик задаёт начало
+    state.to = null;
+  } else if (start < state.from) {
+    state.from = start;          // кликнули раньше начала — двигаем начало
+  } else {
+    // Конец дня, а не начало: иначе «по 29 июля» отрезало бы весь этот день.
+    state.to = endOfDay(date);
+  }
+  renderCalendar();
+  applyDates();
+  if (state.to !== null) toggleCalendar(false);   // отрезок готов — закрываемся
+}
+
+function renderCalendar() {
+  calendar.replaceChildren();
+
+  const head = el("div", "cal-head");
+  const back = el("button", "cal-nav", "‹");
+  back.type = "button";
+  back.setAttribute("aria-label", "Предыдущий месяц");
+  const forward = el("button", "cal-nav", "›");
+  forward.type = "button";
+  forward.setAttribute("aria-label", "Следующий месяц");
+  for (const [btn, step] of [[back, -1], [forward, 1]]) {
+    btn.addEventListener("click", () => {
+      shownMonth = new Date(shownMonth.getFullYear(), shownMonth.getMonth() + step, 1);
+      renderCalendar();
+    });
+  }
+  head.append(back, el("div", "cal-title",
+    MONTHS[shownMonth.getMonth()] + " " + shownMonth.getFullYear()), forward);
+  calendar.append(head);
+
+  const grid = el("div", "cal-grid");
+  for (const day of WEEKDAYS) grid.append(el("div", "cal-weekday", day));
+
+  const year = shownMonth.getFullYear();
+  const month = shownMonth.getMonth();
+  // Неделя начинается с понедельника, а getDay() даёт 0 для воскресенья.
+  const lead = (new Date(year, month, 1).getDay() + 6) % 7;
+  const length = new Date(year, month + 1, 0).getDate();
+  const today = startOfDay(Date.now());
+  const from = state.from === null ? null : startOfDay(state.from);
+  const to = state.to === null ? null : startOfDay(state.to);
+
+  for (let i = 0; i < lead; i++) grid.append(el("div", "cal-day blank"));
+  for (let number = 1; number <= length; number++) {
+    const date = new Date(year, month, number);
+    const at = date.getTime();
+    const btn = el("button", "cal-day", String(number));
+    btn.type = "button";
+    if (at === from || at === to) btn.classList.add("edge");
+    else if (from !== null && to !== null && at > from && at < to) {
+      btn.classList.add("inside");
+    }
+    if (at === today) btn.classList.add("today");
+    // Будущее выбирать нечем: сделок там нет по построению.
+    btn.disabled = at > today;
+    btn.addEventListener("click", () => pickDay(date));
+    grid.append(btn);
+  }
+  calendar.append(grid);
+  calendar.append(el("div", "cal-hint", state.from !== null && state.to === null
+    ? "Теперь выбери конец отрезка"
+    : "Выбери начало и конец отрезка"));
+}
+
+function toggleCalendar(open) {
+  calendar.hidden = !open;
+  datesOpen.setAttribute("aria-expanded", String(open));
+  if (open) {
+    // Открываемся на месяце начала отрезка, а не на текущем: поправить уже
+    // выбранное — самое частое, ради чего календарь открывают второй раз.
+    shownMonth = new Date(state.from === null ? Date.now() : state.from);
+    shownMonth = new Date(shownMonth.getFullYear(), shownMonth.getMonth(), 1);
+    renderCalendar();
+  }
+}
 
 function applyDates() {
-  // Конец дня, а не начало: иначе «по 29 июля» отрезало бы весь этот день.
-  state.from = dateFrom.value ? new Date(dateFrom.value + "T00:00:00").getTime() : null;
-  state.to = dateTo.value ? new Date(dateTo.value + "T23:59:59.999").getTime() : null;
-
   const manual = state.from !== null || state.to !== null;
   datesClear.hidden = !manual;
+  datesOpen.textContent = manual
+    ? fmtDay(state.from) + (state.to === null ? " — …" : " — " + fmtDay(state.to))
+    : "Свой отрезок";
+  datesOpen.classList.toggle("chosen", manual);
   document.querySelectorAll(".periods button").forEach((b) => {
     if (manual) b.removeAttribute("aria-current");
   });
@@ -984,8 +1099,28 @@ function applyDates() {
     const active = document.querySelector(`.periods button[data-days="${state.days}"]`);
     if (active) active.setAttribute("aria-current", "true");
   }
-  loadAll();
+  // Пока выбрано только начало, показывать нечего: отрезок ещё не отрезок.
+  if (!manual || state.to !== null) loadAll();
 }
+
+datesOpen.addEventListener("click", () => toggleCalendar(calendar.hidden));
+
+// Клик внутри календаря наружу не идёт. Без этого он закрывался на первом же
+// выборе дня: обработчик перерисовывает сетку, нажатая кнопка отсоединяется от
+// DOM, и проверка ниже видит её уже не внутри календаря — то есть считает
+// кликом мимо. Ровно та же ловушка ждала стрелки переключения месяца.
+calendar.addEventListener("click", (e) => e.stopPropagation());
+
+// Клик мимо закрывает: обычное поведение всплывающего, и без него календарь
+// приходится закрывать той же кнопкой, что неочевидно.
+document.addEventListener("click", (e) => {
+  if (!calendar.hidden && !calendar.contains(e.target) && e.target !== datesOpen) {
+    toggleCalendar(false);
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !calendar.hidden) toggleCalendar(false);
+});
 
 document.querySelectorAll(".periods button").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -993,8 +1128,9 @@ document.querySelectorAll(".periods button").forEach((btn) => {
     // Пресет и отрезок — одно и то же поле выбора, поэтому пресет чистит даты:
     // иначе кнопка нажималась бы без всякого видимого эффекта.
     state.from = state.to = null;
-    dateFrom.value = dateTo.value = "";
     datesClear.hidden = true;
+    datesOpen.textContent = "Свой отрезок";
+    datesOpen.classList.remove("chosen");
     document.querySelectorAll(".periods button").forEach((b) =>
       b.removeAttribute("aria-current"));
     btn.setAttribute("aria-current", "true");
@@ -1015,12 +1151,68 @@ document.querySelectorAll(".assets button").forEach((btn) => {
   });
 });
 
-dateFrom.addEventListener("change", applyDates);
-dateTo.addEventListener("change", applyDates);
 datesClear.addEventListener("click", () => {
-  dateFrom.value = dateTo.value = "";
+  state.from = state.to = null;
+  toggleCalendar(false);
   applyDates();
 });
+
+/* ---------- отбор и порядок в таблице сделок ---------- */
+
+document.querySelectorAll(".sorts button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.sort = btn.dataset.sort;
+    document.querySelectorAll(".sorts button").forEach((b) =>
+      b.removeAttribute("aria-current"));
+    btn.setAttribute("aria-current", "true");
+    // Только таблица: порядок строк не меняет ни одной цифры над ней.
+    loadTrades().catch(showError);
+  });
+});
+
+const search = document.getElementById("symbol-search");
+let searchTimer = null;
+search.addEventListener("input", () => {
+  // Пауза перед запросом: иначе «btcusdt» — это восемь походов на сервер,
+  // и ответы возвращаются вперемешку.
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.symbol = search.value.trim();
+    loadTrades().catch(showError);
+  }, 250);
+});
+
+/* Отметка, по которой отобрана таблица. Показывается плашкой со снятием:
+   молчаливый отбор — способ час смотреть на неполный список и не понять. */
+function renderTagFilter() {
+  const box = document.getElementById("tag-filter");
+  box.replaceChildren();
+  box.hidden = state.tag === null;
+  if (state.tag === null) return;
+
+  const tag = state.tags[state.tag.kind].find((t) => t.id === state.tag.id);
+  const words = state.tag.kind === "rule" ? "нарушено правило" : "основание";
+  box.append(el("span", "tag-chip-label",
+    words + ": " + (tag ? tag.body : state.tag.id)));
+  const drop = el("button", "tag-chip-drop", "снять");
+  drop.type = "button";
+  drop.addEventListener("click", () => selectTag(null));
+  box.append(drop);
+}
+
+function selectTag(pick) {
+  // Повторный клик по той же отметке снимает отбор — тем же движением, каким
+  // он ставится.
+  const same = state.tag && pick && state.tag.kind === pick.kind
+    && state.tag.id === pick.id;
+  state.tag = same ? null : pick;
+  renderTagFilter();
+  document.querySelectorAll(".rule").forEach((row) => {
+    row.classList.toggle("picked",
+      state.tag !== null && row.dataset.tagId === state.tag.id);
+  });
+  loadTrades().catch(showError);
+}
 
 document.getElementById("only-pending").addEventListener("change", (e) => {
   state.pendingOnly = e.target.checked;

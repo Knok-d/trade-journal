@@ -67,7 +67,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 
 .periods, .assets { display: flex; gap: var(--s1); }
 
-.periods button, .assets button {
+.periods button, .assets button, .sorts button {
   min-height: 36px;
   padding: 0 var(--s3);
   border: 1px solid var(--border);
@@ -79,9 +79,13 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   transition: color 150ms, border-color 150ms, background 150ms;
 }
 
-.periods button:hover, .assets button:hover { color: var(--fg); border-color: var(--fg-muted); }
+.periods button:hover, .assets button:hover, .sorts button:hover {
+  color: var(--fg);
+  border-color: var(--fg-muted);
+}
 
-.periods button[aria-current="true"], .assets button[aria-current="true"] {
+.periods button[aria-current="true"], .assets button[aria-current="true"],
+.sorts button[aria-current="true"] {
   color: var(--fg);
   background: var(--muted);
   border-color: var(--accent);
@@ -101,8 +105,6 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   border-radius: var(--radius);
   padding: var(--s3);
 }
-
-.kpi.headline { border-color: var(--accent); }
 
 .kpi .label { font-size: 12px; color: var(--fg-muted); }
 
@@ -247,35 +249,131 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   flex-wrap: wrap;
 }
 
-.dates { display: flex; align-items: center; gap: var(--s1); }
+.dates { display: flex; align-items: center; gap: var(--s1); position: relative; }
 
-.dates input {
-  min-height: 36px;
-  padding: 0 var(--s2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: var(--fg);
-  font: 500 13px var(--font-ui);
-  color-scheme: dark;
-}
-
-.dates input:focus { border-color: var(--ring); outline: none; }
-
-.dates .dash { color: var(--fg-muted); }
-
-.dates button {
+/* Только прямые дети: внутри .dates теперь живёт ещё и календарь, а у его
+   кнопок своя геометрия. Без `>` этот padding доставался и клеткам дня —
+   на клетке в 32px под цифру оставалось 8px, и двузначные числа выдавливало
+   к краю. */
+.dates > button {
   min-height: 36px;
   padding: 0 var(--s3);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: none;
+  background: var(--panel);
   color: var(--fg-muted);
   font: 500 13px var(--font-ui);
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.dates button:hover { color: var(--fg); border-color: var(--fg-muted); }
+.dates > button:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+.dates > button.chosen {
+  color: var(--fg);
+  background: var(--muted);
+  border-color: var(--accent);
+}
+
+/* ---------- свой календарь ----------
+
+   Рисуется вручную, потому что выпадающий календарь нативного <input
+   type="date"> — элемент браузера, и стилизовать его нельзя в принципе. */
+
+.calendar {
+  position: absolute;
+  top: calc(100% + var(--s1));
+  /* Прижат правым краем: панель управления стоит справа в шапке, и с левой
+     привязкой календарь уезжал за край окна на узком экране. */
+  right: 0;
+  z-index: 20;
+  width: 260px;
+  padding: var(--s3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.5);
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--s2);
+}
+
+.cal-title { font: 600 13px var(--font-ui); }
+
+.cal-nav {
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cal-nav:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+/* minmax(0, 1fr), а не 1fr: у кнопки есть своя минимальная ширина от padding,
+   и с голым 1fr седьмой столбец не влезал — воскресенье уезжало за край. */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+}
+
+.cal-weekday {
+  text-align: center;
+  font: 500 10px var(--font-ui);
+  color: var(--fg-muted);
+  padding-bottom: var(--s1);
+}
+
+/* Центрирование задано явно, а не оставлено на умолчания кнопки: цифра должна
+   стоять посреди клетки при любой ширине — и однозначная, и двузначная. */
+.cal-day {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--fg);
+  font: 500 12px var(--font-data);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.cal-day.blank { cursor: default; }
+
+.cal-day:disabled { color: var(--border); cursor: default; }
+
+.cal-day:not(:disabled):hover { background: var(--muted); }
+
+/* Сегодня — только обводка: это ориентир, а не выбор. */
+.cal-day.today { border-color: var(--border); }
+
+.cal-day.inside { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+.cal-day.edge {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.cal-hint {
+  margin-top: var(--s2);
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: center;
+}
 
 /* Правая колонка: правила и основания друг под другом. */
 .stack { display: grid; gap: var(--s4); align-content: start; }
@@ -341,6 +439,24 @@ td.lev { color: var(--fg-muted); }
 
 .rule-archive:hover { color: var(--fg); }
 
+/* Цифры отметки — кнопка: «покажи те самые сделки». Выглядит текстом, пока на
+   неё не навели: рамка вокруг каждой строки списка была бы шумом. */
+.rule-pick {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: var(--s1) var(--s2);
+  cursor: pointer;
+}
+
+.rule-pick:hover { border-color: var(--fg-muted); }
+
+.rule-pick:focus-visible { outline: 2px solid var(--ring); }
+
+.rule.picked { border-left-color: var(--accent); }
+
+.rule.picked .rule-pick { border-color: var(--accent); }
+
 .rule-add { display: flex; gap: var(--s2); margin-top: var(--s3); }
 
 .rule-add input {
@@ -396,6 +512,58 @@ td.lev { color: var(--fg-muted); }
   flex-wrap: wrap;
   margin-bottom: var(--s2);
 }
+
+.table-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+}
+
+.sorts { display: flex; gap: var(--s1); }
+
+.search {
+  min-height: 36px;
+  width: 130px;
+  padding: 0 var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg);
+  font: 500 13px var(--font-ui);
+}
+
+.search::placeholder { color: var(--fg-muted); }
+
+.search:focus { border-color: var(--ring); outline: none; }
+
+/* Плашка активного отбора. Отбор без видимого признака — способ час смотреть
+   на неполный список и не понять, почему он неполный. */
+.tag-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font-size: 13px;
+}
+
+.tag-chip-label { flex: 1; min-width: 0; }
+
+.tag-chip-drop {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  font: 500 12px var(--font-ui);
+  padding: var(--s1) var(--s2);
+  cursor: pointer;
+}
+
+.tag-chip-drop:hover { color: var(--fg); border-color: var(--fg-muted); }
 
 .pending-toggle {
   font-size: 13px;
@@ -585,7 +753,8 @@ tr.detail td {
 }
 
 @media (pointer: coarse) {
-  .periods button, .assets button, .note-actions button { min-height: 44px; }
+  .periods button, .assets button, .sorts button,
+  .note-actions button { min-height: 44px; }
   tr.trade td { padding: var(--s3) var(--s2); }
 }
 

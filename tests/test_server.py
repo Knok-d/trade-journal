@@ -87,7 +87,8 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(data["summary"]["n"], 2)
         self.assertIn("win_rate_ci", data["summary"])
         self.assertFalse(data["r"]["available"], "R без стопов должен быть недоступен")
-        self.assertIn("annotated", data["coverage"])
+        self.assertNotIn("coverage", data,
+                         "разобранность из дашборда убрана — не должна и ездить")
 
     def test_trades_listing(self):
         _, _, body = self._get("/api/trades?days=0")
@@ -95,20 +96,23 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(len(trades), 2)
         self.assertEqual({t["symbol"] for t in trades}, {"BTCUSDT", "SOLUSDT"})
 
-    def test_note_roundtrip_updates_coverage_and_pending(self):
-        status, payload = self._post(
+    def test_note_roundtrip_moves_the_trade_out_of_pending_and_back(self):
+        status, _ = self._post(
             "/api/note", {"trade_id": self.trade_id, "body": "тест разбора"})
         self.assertEqual(status, 200)
-        self.assertEqual(payload["coverage"]["annotated"], 1)
 
         _, _, body = self._get("/api/trades?days=0&pending=1")
         pending = json.loads(body)["trades"]
         self.assertEqual([t["symbol"] for t in pending], ["SOLUSDT"],
                          "разобранная сделка должна уйти из pending")
 
-        # очистка заметки возвращает сделку в pending
-        status, payload = self._post("/api/note", {"trade_id": self.trade_id, "body": ""})
-        self.assertEqual(payload["coverage"]["annotated"], 0)
+        # Очистка разбора возвращает сделку в pending: пустое тело — это
+        # стирание, а не «разобрано пустотой».
+        self._post("/api/note", {"trade_id": self.trade_id, "body": ""})
+        _, _, body = self._get("/api/trades?days=0&pending=1")
+        self.assertEqual(
+            {t["symbol"] for t in json.loads(body)["trades"]},
+            {"BTCUSDT", "SOLUSDT"})
 
     def test_note_for_unknown_trade_is_404(self):
         status, _ = self._post("/api/note", {"trade_id": "nope", "body": "x"})
@@ -330,34 +334,31 @@ class OpenTradeAndAssetTest(unittest.TestCase):
         finally:
             self._set_closed_at(200 * HOUR)
 
-    def _summary(self, query=""):
-        with urllib.request.urlopen(
-                f"http://127.0.0.1:{self.port}/api/summary{query}") as r:
-            return json.loads(r.read())
+    def test_search_by_ticker_matches_a_substring(self):
+        """Набрал «xau» — получил XAUUSDT: точного совпадения от поиска не ждут."""
+        self.assertEqual([t["symbol"] for t in self._trades("?days=0&symbol=xau")],
+                         ["XAUUSDT"])
+        self.assertEqual([t["symbol"] for t in self._trades("?days=0&symbol=USDT")],
+                         ["XAUUSDT", "BTCUSDT"])
+        self.assertEqual(self._trades("?days=0&symbol=zzz"), [])
 
-    def test_coverage_counts_exactly_what_the_table_shows(self):
-        """Плашка «Разобрано» обязана считать по тем же сделкам, что под ней.
+    def test_sort_by_profit_and_by_loss_are_mirror_images(self):
+        best = self._trades("?days=0&sort=profit")
+        worst = self._trades("?days=0&sort=loss")
+        closed = [t for t in best if t["closed_at"] is not None]
+        self.assertEqual([t["trade_id"] for t in closed],
+                         list(reversed([t["trade_id"] for t in worst
+                                        if t["closed_at"] is not None])))
 
-        Раньше она была на весь дневник: при выбранном TradFi показывала счёт
-        по всем сделкам сразу, и «10 / 177» стояло над таблицей из двух строк.
-        """
-        for query in ("?days=0", "?days=0&asset=tradfi", "?days=0&asset=crypto",
-                      "?days=1", "?from=%d&to=%d" % (198 * HOUR, 201 * HOUR)):
-            with self.subTest(query=query):
-                self.assertEqual(
-                    self._summary(query)["coverage"]["trades"],
-                    len(self._trades(query)),
-                    "знаменатель плашки разошёлся с таблицей",
-                )
-
-    def test_coverage_follows_the_asset_filter(self):
-        self.assertEqual(self._summary("?days=0&asset=tradfi")["coverage"]["trades"], 1)
-        self.assertEqual(self._summary("?days=0&asset=crypto")["coverage"]["trades"], 1)
-        self.assertEqual(self._summary("?days=0")["coverage"]["trades"], 2)
-
-    def test_open_trade_stays_in_the_denominator_of_a_narrow_period(self):
-        """Разбор пишется и на живой позиции, значит она входит в разобранность."""
-        self.assertEqual(self._summary("?days=1")["coverage"]["trades"], 2)
+    def test_open_trade_sinks_in_a_money_sort(self):
+        """Итога у неё нет, и держать её сверху значило бы отвечать прочерком
+        на вопрос «где мой лучший результат»."""
+        for sort in ("profit", "loss"):
+            with self.subTest(sort=sort):
+                rows = self._trades(f"?days=0&sort={sort}")
+                self.assertIsNone(rows[-1]["closed_at"])
+        self.assertIsNone(self._trades("?days=0")[0]["closed_at"],
+                          "а по времени она, наоборот, закреплена сверху")
 
     def test_asset_filter_splits_without_losing_anything(self):
         everything = self._trades("?days=0")
@@ -374,6 +375,55 @@ class OpenTradeAndAssetTest(unittest.TestCase):
     def test_unknown_asset_value_shows_everything(self):
         """Пустой дневник читался бы как «сделок нет», а не как опечатка в адресе."""
         self.assertEqual(len(self._trades("?days=0&asset=nonsense")), 2)
+
+
+class MoneyOrderTest(unittest.TestCase):
+    """Сортировка по деньгам сравнивает числа, а не строки.
+
+    `net_pnl` хранится текстом (Decimal через TEXT — деньги во float считать
+    нельзя), и без CAST сортировка идёт лексикографически.
+
+    Ломается при этом ПРИБЫЛЬ, а не убыток, и это стоит знать, прежде чем
+    какой-нибудь из этих тестов покажется лишним: у отрицательных чисел
+    лексический порядок случайно совпадает с числовым, поэтому «худший убыток
+    первым» проходит и без CAST. А вот строкой «9» больше «100» — и лучшей
+    сделкой периода объявлялась бы девятидолларовая. Проверено: без CAST
+    падает ровно `test_best_profit_comes_first`.
+
+    Проверяется сам кусок SQL, без сервера: он тут и есть предмет.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.conn = db.connect(Path(self.tmp.name) / "order.db")
+        for symbol, net in (("A", "-9"), ("B", "-58"), ("C", "100"),
+                            ("D", "9"), ("E", None)):
+            self.conn.execute(
+                "INSERT INTO round_trips (trade_id, category, symbol, position_idx,"
+                " direction, opened_at, closed_at, qty, avg_entry, fees, funding,"
+                " net_pnl) VALUES (?,'linear',?,0,'long',1,?,'1','1','0','0',?)",
+                (symbol, symbol, None if net is None else 2, net))
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def _order(self, key):
+        return [r["symbol"] for r in self.conn.execute(
+            "SELECT rt.symbol FROM round_trips rt"
+            f" ORDER BY {server.Handler.ORDERS[key]}")]
+
+    def test_worst_loss_comes_first(self):
+        self.assertEqual(self._order("loss")[0], "B", "-58 хуже, чем -9")
+
+    def test_best_profit_comes_first(self):
+        self.assertEqual(self._order("profit")[0], "C", "100 больше, чем 9")
+
+    def test_open_trade_is_last_in_both_money_orders(self):
+        for key in ("loss", "profit"):
+            with self.subTest(key=key):
+                self.assertEqual(self._order(key)[-1], "E")
 
 
 class MiniAppAuthTest(unittest.TestCase):

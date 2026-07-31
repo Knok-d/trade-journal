@@ -111,23 +111,21 @@ def reviewed_sql(alias: str = "") -> str:
     )
 
 
-def coverage(conn: sqlite3.Connection, days: int = 0, *,
-             since: int | None = None, until: int | None = None,
-             asset: str | None = None) -> dict:
-    """Разобранность сделок — заголовочная метрика продукта (решение C).
+def coverage(conn: sqlite3.Connection, days: int = 0) -> dict:
+    """Разобранность сделок: сколько из них имеют хоть какое-то объяснение.
 
     «Разобрана» — см. `reviewed_sql`: заметка постфактум (основной режим),
     намерение до входа (высший тир) или проставленное основание. Pre-trade
     считается отдельно как подпоказатель — разрыв между ними и есть
     измеритель рационализации, а не повод бить по рукам.
 
-    Период и класс актива — те же, что у таблицы сделок, и ровно теми же
-    словами (`stats.trade_scope`): плашка обязана считать то, что показано под
-    ней. Без аргументов — по всему дневнику, как и было.
+    Из дашборда метрика убрана, живёт в `journal coverage`, текстовом отчёте и
+    боте. Отбор берётся общий (`stats.trade_scope`), поэтому открытая позиция
+    в счёт входит: разбор на ней пишется, значит и спрашивать его с неё честно.
     """
     from .stats import trade_scope
 
-    where, params = trade_scope(days, since=since, until=until, asset=asset)
+    where, params = trade_scope(days)
     scope = (" FROM round_trips rt"
              " LEFT JOIN symbols s ON s.symbol = rt.symbol"
              f" WHERE {where}")
