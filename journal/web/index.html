@@ -34,11 +34,25 @@
   </div>
 </header>
 
+<!-- Период и класс актива живут в шапке над вкладками: фильтр общий на все
+     три раздела. Продублировать его внутри разделов значило бы завести три
+     состояния одного фильтра и рано или поздно их разойтись. -->
+<nav class="tabs" id="tabs" aria-label="Разделы">
+  <button type="button" data-tab="home" aria-current="page">Главная</button>
+  <button type="button" data-tab="analytics">Аналитика</button>
+  <button type="button" data-tab="trades">Сделки</button>
+</nav>
+
 <main>
-  <section class="panel" id="open-panel" aria-labelledby="open-h" hidden>
-    <h2 id="open-h">Открытые позиции <span class="h-sub" id="open-sub"></span></h2>
+
+<!-- ========== ГЛАВНАЯ: что происходит прямо сейчас ========== -->
+<section class="tab-panel" data-panel="home" aria-label="Главная">
+  <section class="cards" id="today-cards" aria-live="polite"></section>
+
+  <section class="panel" data-open-panel aria-labelledby="open-h" hidden>
+    <h2 id="open-h">Открытые позиции <span class="h-sub" data-open-sub></span></h2>
     <div class="table-wrap">
-      <table id="open-table">
+      <table>
         <thead>
           <tr>
             <th scope="col">Символ</th>
@@ -51,58 +65,96 @@
             <th scope="col" class="num">Ликвидация</th>
           </tr>
         </thead>
-        <tbody id="open-body"></tbody>
+        <tbody data-open-body></tbody>
       </table>
     </div>
   </section>
 
-  <section class="charts">
-    <div class="panel" aria-labelledby="equity-h">
-      <h2 id="equity-h">Кривая эквити <span class="h-sub" id="equity-sub"></span></h2>
-      <div id="equity" class="chart"></div>
-    </div>
-    <div class="panel" aria-labelledby="daily-h">
-      <h2 id="daily-h">По дням <span class="h-sub" id="daily-sub"></span></h2>
-      <div id="daily" class="chart"></div>
-    </div>
-  </section>
+  <div class="panel" aria-labelledby="equity-h">
+    <h2 id="equity-h">Кривая эквити <span class="h-sub" id="equity-sub"></span></h2>
+    <div id="equity" class="chart"></div>
+  </div>
 
-  <section class="kpis" id="kpis" aria-live="polite"></section>
-
-  <div class="columns">
+  <div class="columns even">
     <section class="panel" aria-labelledby="top-h">
-      <h2 id="top-h">Топ прибыльных сделок <span class="h-sub" id="top-sub"></span></h2>
+      <h2 id="top-h">Лучшие сделки <span class="h-sub" id="top-sub"></span></h2>
       <div id="top-trades" class="histogram"></div>
     </section>
-
-    <div class="stack">
-      <section class="panel" aria-labelledby="rule-h" data-kind="rule">
-        <h2 id="rule-h">Правила <span class="h-sub" data-sub></span></h2>
-        <div class="rules-summary" data-summary></div>
-        <ul class="rules" data-list></ul>
-        <form class="rule-add" data-add>
-          <input type="text" maxlength="200"
-                 placeholder="Своё правило: «не усредняться в убыток»"
-                 aria-label="Новое правило">
-          <button type="submit">Добавить</button>
-        </form>
-        <p class="rules-hint" data-hint></p>
-      </section>
-
-      <section class="panel" aria-labelledby="reason-h" data-kind="reason">
-        <h2 id="reason-h">Основания входа <span class="h-sub" data-sub></span></h2>
-        <div class="rules-summary" data-summary></div>
-        <ul class="rules" data-list></ul>
-        <form class="rule-add" data-add>
-          <input type="text" maxlength="200"
-                 placeholder="Своя заготовка: «отскок от уровня»"
-                 aria-label="Новое основание">
-          <button type="submit">Добавить</button>
-        </form>
-        <p class="rules-hint" data-hint></p>
-      </section>
-    </div>
+    <section class="panel" aria-labelledby="worst-h">
+      <h2 id="worst-h">Худшие сделки <span class="h-sub" id="worst-sub"></span></h2>
+      <div id="worst-trades" class="histogram"></div>
+    </section>
   </div>
+</section>
+
+<!-- ========== АНАЛИТИКА: как я торговал за период ========== -->
+<section class="tab-panel" data-panel="analytics" aria-label="Аналитика" hidden>
+  <section class="kpis" id="kpis" aria-live="polite"></section>
+
+  <section class="panel" aria-labelledby="pnl-h">
+    <div class="table-head">
+      <h2 id="pnl-h">Суточный P&amp;L <span class="h-sub" id="daily-sub"></span></h2>
+      <div class="table-tools">
+        <div class="month-nav" id="month-nav">
+          <button type="button" id="pnl-prev" aria-label="Предыдущий месяц">‹</button>
+          <span id="pnl-month"></span>
+          <button type="button" id="pnl-next" aria-label="Следующий месяц">›</button>
+        </div>
+        <!-- Свой класс, не .sorts: на .sorts button уже висит обработчик
+             порядка строк в таблице сделок, и переключатель вида молча
+             перевёл бы сортировку в несуществующий режим. -->
+        <nav class="seg" id="pnl-view" aria-label="Вид">
+          <button type="button" data-view="calendar" aria-current="true">Календарь</button>
+          <button type="button" data-view="chart">График</button>
+        </nav>
+      </div>
+    </div>
+    <div class="pnl-summary" id="pnl-summary"></div>
+    <div class="pnl-scroll">
+      <div class="pnl-cal" id="pnl-calendar"></div>
+    </div>
+    <div id="daily" class="chart" hidden></div>
+  </section>
+
+  <div class="columns">
+    <section class="panel" aria-labelledby="rule-h" data-kind="rule">
+      <h2 id="rule-h">Нарушения <span class="h-sub" data-sub></span></h2>
+      <div class="rules-summary" data-summary></div>
+      <ul class="rules" data-list></ul>
+      <p class="rules-hint" data-hint></p>
+    </section>
+
+    <section class="panel" aria-labelledby="reason-h" data-kind="reason">
+      <h2 id="reason-h">Основания входа <span class="h-sub" data-sub></span></h2>
+      <div class="rules-summary" data-summary></div>
+      <ul class="rules" data-list></ul>
+      <p class="rules-hint" data-hint></p>
+    </section>
+  </div>
+</section>
+
+<!-- ========== СДЕЛКИ: список и разбор ========== -->
+<section class="tab-panel" data-panel="trades" aria-label="Сделки" hidden>
+  <section class="panel" data-open-panel aria-labelledby="open-h2" hidden>
+    <h2 id="open-h2">Открытые позиции <span class="h-sub" data-open-sub></span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Символ</th>
+            <th scope="col">Напр.</th>
+            <th scope="col" class="num">Объём</th>
+            <th scope="col" class="num">Вход</th>
+            <th scope="col" class="num">Сейчас</th>
+            <th scope="col" class="num">Плечо</th>
+            <th scope="col" class="num">P&amp;L, USDT</th>
+            <th scope="col" class="num">Ликвидация</th>
+          </tr>
+        </thead>
+        <tbody data-open-body></tbody>
+      </table>
+    </div>
+  </section>
 
   <section class="panel" aria-labelledby="trades-h">
     <div class="table-head">
@@ -140,7 +192,21 @@
       </table>
     </div>
   </section>
+</section>
+
 </main>
+
+<!-- Разбор уехал из строки таблицы в боковую панель: сюда же переехало
+     заведение своих правил и оснований, а на строку его было не уместить. -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true"
+       aria-labelledby="drawer-title" hidden>
+  <div class="drawer-head">
+    <h2 id="drawer-title">Разбор сделки</h2>
+    <button type="button" id="drawer-close" aria-label="Закрыть разбор">×</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
 
 <footer class="foot">
   Локальные данные · ключ биржи только на чтение · сервер слушает 127.0.0.1

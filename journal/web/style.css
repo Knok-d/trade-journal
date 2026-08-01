@@ -1,26 +1,60 @@
-/* Data-Dense Dashboard, тёмная финансовая палитра (ui-ux-pro-max:
-   Financial Dashboard dark). Шрифты системные: внешних запросов у этой
-   страницы нет вообще — см. CSP сервера. */
+/* Data-Dense Dashboard, тёмная база со светло-фиолетовым акцентом. Шрифты
+   системные: внешних запросов у этой страницы нет вообще — см. CSP сервера. */
 
 :root {
-  --bg: #020617;
-  --panel: #0e1223;
-  --muted: #1a1e2f;
-  --border: #334155;
-  --fg: #f8fafc;
-  --fg-muted: #94a3b8;
-  --pos: #22c55e;
-  --neg: #ef4444;
-  --accent: #3b82f6;
-  --ring: #60a5fa;
+  /* Серые уведены в фиолетовый подтон, а не в синий: иначе акцент выглядит
+     на них случайным гостем. */
+  --bg: #0e0c13;
+  --panel: #17141f;
+  --muted: #211d2c;
+
+  /* Две рамки, а не одна. --border рисует линейки таблиц: их контраст к фону
+     намеренно низкий, они не должны спорить с данными. --border-strong —
+     единственная граница поля ввода или кнопки, и ей нужно 3:1, иначе контрол
+     физически не виден. */
+  --border: #332c44;
+  --border-strong: #6b6088;
+
+  --fg: #f4f2f8;
+  --fg-muted: #a79fba;
+
+  /* Знак денег. Зелёный и красный заняты только этим и больше ничем.
+     Красный сдвинут с привычного #ef4444: тот совпадал по светлоте с акцентом
+     (1.01), и на графике фиолетовая линия сливалась с красным столбиком —
+     для дальтоника и в оттенках серого это был один цвет. */
+  --pos: #34d399;
+  --neg: #f43f5e;
+  --pos-soft: rgba(52, 211, 153, 0.14);
+  --neg-soft: rgba(244, 63, 94, 0.14);
+
+  /* Акцент — навигация, ссылки, линии графиков, «требует твоего действия». */
+  --accent: #a78bfa;
+  --accent-hi: #c7b6fd;
+  --accent-soft: rgba(167, 139, 250, 0.14);
+
+  /* Заливка главной карточки берётся с глубокого конца шкалы: только там
+     белый текст проходит по контрасту (5.7:1). На светлом фиолетовом он даёт
+     2.72:1, поэтому на светлых заливках текст тёмный, а не белый. */
+  --accent-fill-from: #6d28d9;
+  --accent-fill-to: #7c3aed;
+  --on-accent-deep: #ffffff;
+  --on-accent-light: #0e0c13;
+
+  --ring: #a78bfa;
   --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.14);
 
   --font-ui: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
   --font-data: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   /* density 8/10: плотная сетка 4/8, компактные панели */
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px;
-  --radius: 8px;
+  --s6: 32px; --s7: 48px;
+
+  --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-full: 999px;
+  /* Старое имя оставлено псевдонимом среднего: им набрано полфайла, и
+     переименование ради переименования — это диф, который нечем проверить. */
+  --radius: var(--radius-md);
 
   /* Ширина страницы одна на шапку и на содержимое: раньше 1180 стояло в двух
      местах, и стоило поменять одно — заголовок переставал совпадать с
@@ -72,12 +106,12 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 
 .brand-sub { color: var(--fg-muted); font-size: 12px; }
 
-.periods, .assets { display: flex; gap: var(--s1); }
+.periods, .assets, .seg { display: flex; gap: var(--s1); }
 
-.periods button, .assets button, .sorts button {
+.periods button, .assets button, .sorts button, .seg button {
   min-height: 36px;
   padding: 0 var(--s3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel);
   color: var(--fg-muted);
@@ -135,6 +169,10 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
   gap: var(--s4);
 }
+
+/* Лучшие и худшие сделки — равноправная пара: перекос колонок читался бы как
+   «эта половина важнее», а они ровно одинаково важны. */
+.columns.even { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 
 .panel {
   background: var(--panel);
@@ -235,7 +273,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   padding: var(--s1) var(--s2);
   border-radius: 999px;
   background: var(--muted);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   color: var(--fg);
   font: 500 12px var(--font-ui);
   font-variant-numeric: tabular-nums;
@@ -265,7 +303,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 .dates > button {
   min-height: 36px;
   padding: 0 var(--s3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel);
   color: var(--fg-muted);
@@ -315,7 +353,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
   min-height: 28px;
   min-width: 28px;
   padding: 0;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: none;
   color: var(--fg-muted);
@@ -372,7 +410,7 @@ h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
 .cal-day.edge {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent-light);
 }
 
 .cal-hint {
@@ -470,7 +508,7 @@ td.lev { color: var(--fg-muted); }
   flex: 1;
   min-width: 0;
   background: var(--muted);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   color: var(--fg);
   font: inherit;
@@ -486,7 +524,7 @@ td.lev { color: var(--fg-muted); }
   border-radius: var(--radius);
   border: 1px solid var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent-light);
   font: 500 13px var(--font-ui);
   cursor: pointer;
 }
@@ -499,10 +537,14 @@ td.lev { color: var(--fg-muted); }
 
 .violations-title { color: var(--fg-muted); font-size: 12px; }
 
+/* Кликается вся строка, а не квадратик 18×18: у самого чекбокса цель нажатия
+   вдвое меньше любого норматива, а метка рядом с ним — бесплатная площадь. */
 .violation {
   display: flex;
   align-items: flex-start;
   gap: var(--s2);
+  min-height: 32px;
+  padding: var(--s1) 0;
   font-size: 13px;
   cursor: pointer;
 }
@@ -533,7 +575,7 @@ td.lev { color: var(--fg-muted); }
   min-height: 36px;
   width: 130px;
   padding: 0 var(--s3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   background: var(--panel);
   color: var(--fg);
@@ -562,7 +604,7 @@ td.lev { color: var(--fg-muted); }
 
 .tag-chip-drop {
   background: none;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   color: var(--fg-muted);
   font: 500 12px var(--font-ui);
@@ -695,7 +737,7 @@ tr.detail td {
 
 .note-editor textarea {
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   color: var(--fg);
   font: 13px/1.5 var(--font-ui);
@@ -714,7 +756,7 @@ tr.detail td {
   border-radius: var(--radius);
   border: 1px solid var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent-light);
   font: 500 13px var(--font-ui);
   cursor: pointer;
   transition: opacity 150ms;
@@ -741,6 +783,268 @@ tr.detail td {
   font-size: 11px;
 }
 
+/* ---------- вкладки ---------- */
+
+/* Полоса под вкладками идёт во всю ширину страницы, поэтому граница висит на
+   самой .tabs. Активная вкладка «садится» на неё своим -1px. */
+.tabs {
+  display: flex;
+  gap: var(--s5);
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: var(--s4) var(--s4) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  font: 500 15px var(--font-ui);
+  padding: var(--s2) var(--s1);
+  margin-bottom: -1px;
+  transition: color 150ms, border-color 150ms;
+}
+
+.tabs button:hover { color: var(--fg); border-bottom-color: var(--border-strong); }
+
+/* Активная отмечена и цветом, и полосой. Цвета одного мало: в оттенках серого
+   и при дальтонизме остаётся только полоса. */
+.tabs button[aria-current="page"] {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+}
+
+.tabs button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+.tab-panel { display: grid; gap: var(--s4); }
+
+/* ---------- карточки состояния на главной ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s3);
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--s4);
+}
+
+/* Главная цифра залита акцентом — глубоким его концом. На светлом фиолетовом
+   белый текст даёт 2.72:1, здесь 5.7:1 и выше. Подпись и уточнение тоже
+   полностью белые: приглушить их прозрачностью значило бы увести контраст
+   под порог, поэтому иерархию держит размер, а не блёклость. */
+.card.hero {
+  background: linear-gradient(135deg, var(--accent-fill-from), var(--accent-fill-to));
+  border-color: transparent;
+}
+
+.card .label { font-size: 12px; color: var(--fg-muted); }
+
+.card .value {
+  font: 600 28px/1.2 var(--font-data);
+  font-variant-numeric: tabular-nums;
+  margin-top: var(--s1);
+}
+
+.card .hint { font-size: 11px; color: var(--fg-muted); margin-top: var(--s1); }
+
+/* Неразобранные — не ошибка и не убыток, а несделанная работа. Поэтому акцент,
+   а не красный: красный в этом интерфейсе занят знаком денег. */
+.card .value.todo { color: var(--accent); }
+
+.card.hero .label,
+.card.hero .value,
+.card.hero .hint { color: var(--on-accent-deep); }
+
+/* Счётчик неразобранных — кнопка: он существует, чтобы по нему уйти к делу. */
+button.card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 150ms;
+}
+
+button.card:hover { border-color: var(--accent); }
+
+button.card:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+/* ---------- календарь P&L ---------- */
+
+.pnl-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s2) var(--s5);
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: var(--s3);
+}
+
+/* Цвет прописан здесь, а не наследуется от .pos/.neg: у `.pnl-summary b`
+   специфичность выше, и общий класс до него бы не дотянулся. */
+.pnl-summary b {
+  font: 600 15px var(--font-data);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+
+.pnl-summary b.pos { color: var(--pos); }
+.pnl-summary b.neg { color: var(--neg); }
+
+.month-nav { display: flex; align-items: center; gap: var(--s2); }
+
+.month-nav button {
+  min-height: 32px;
+  min-width: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--fg-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.month-nav button:hover { color: var(--fg); border-color: var(--fg-muted); }
+
+.month-nav button:focus-visible { outline: 2px solid var(--ring); }
+
+.month-nav span {
+  font: 500 13px var(--font-ui);
+  min-width: 110px;
+  text-align: center;
+}
+
+/* Семь колонок с суммой внутри перестают помещаться примерно ниже 360px. Ужать
+   их до нечитаемости хуже, чем прокрутить: месяц должен читаться месяцем.
+   Поэтому едет сам календарь внутри своей панели, а страница по горизонтали
+   не едет никогда. */
+.pnl-scroll { overflow-x: auto; }
+
+.pnl-cal {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: var(--s2);
+  min-width: 320px;
+}
+
+.pnl-weekday {
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-align: center;
+  padding-bottom: var(--s1);
+}
+
+.pnl-day {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 68px;
+  padding: var(--s2);
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms;
+}
+
+/* Свои имена, а не .pos/.neg: те задают цвет ТЕКСТА и покрасили бы номер дня
+   вместе с суммой. Здесь цветом залит фон, а текст остаётся обычным. */
+.pnl-day.gain { background: var(--pos-soft); }
+.pnl-day.loss { background: var(--neg-soft); }
+
+.pnl-day.blank { background: none; border-color: transparent; cursor: default; }
+
+/* День месяца, в который не торговали: остаётся на сетке, чтобы месяц читался
+   месяцем, но цифру приглушаем — она здесь только ради ориентира. */
+.pnl-day.flat { cursor: default; }
+.pnl-day.flat .pnl-num { color: var(--fg-muted); font-weight: 400; }
+
+.pnl-day:not(.blank):hover { border-color: var(--border-strong); }
+
+.pnl-day.picked { border-color: var(--accent); }
+
+.pnl-day:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+.pnl-num { font-size: 12px; font-weight: 600; }
+
+.pnl-money {
+  font: 12px var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+.pnl-count { font-size: 11px; color: var(--fg-muted); }
+
+/* ---------- боковая панель разбора ---------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(6, 4, 10, 0.55);
+}
+
+.drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 50;
+  width: min(560px, 100vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -24px 0 48px rgba(0, 0, 0, 0.45);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s4);
+  border-bottom: 1px solid var(--border);
+}
+
+.drawer-head h2 { margin: 0; font-size: 15px; }
+
+#drawer-close {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-size: 22px;
+  line-height: 1;
+  min-height: 36px;
+  min-width: 36px;
+}
+
+#drawer-close:hover { color: var(--fg); border-color: var(--border-strong); }
+
+#drawer-close:focus-visible { outline: 2px solid var(--ring); }
+
+.drawer-body { flex: 1; overflow-y: auto; padding: var(--s4); }
+
+/* Панель приезжает справа — оттуда, куда уехала строка. */
+@media (prefers-reduced-motion: no-preference) {
+  .drawer { animation: drawer-in 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+  @keyframes drawer-in {
+    from { transform: translateX(24px); opacity: 0; }
+  }
+}
+
 /* ---------- адаптив и доступность ---------- */
 
 /* Порог поднят с 900: в правой колонке теперь правила и основания, и на
@@ -754,14 +1058,26 @@ tr.detail td {
 @media (max-width: 700px) {
   main, .topbar { padding: var(--s2); }
   .topbar { padding-bottom: 0; }
+  .tabs { padding: var(--s3) var(--s2) 0; gap: var(--s4); }
   .kpis { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .kpi { padding: var(--s2) var(--s3); }
   .panel { padding: var(--s3); }
+  .cards { grid-template-columns: 1fr; }
+
+  /* Календарь остаётся семью колонками — месяц иначе перестаёт читаться как
+     месяц. Ужимается ячейка, а из неё первым уходит счётчик сделок: сумма
+     важнее. */
+  .pnl-cal { gap: var(--s1); }
+  .pnl-day { min-height: 54px; padding: var(--s1); }
+  .pnl-count { display: none; }
+  .pnl-money { font-size: 11px; }
 }
 
 @media (pointer: coarse) {
   .periods button, .assets button, .sorts button,
+  .tabs button, .month-nav button,
   .note-actions button { min-height: 44px; }
+  .violation { min-height: 44px; }
   tr.trade td { padding: var(--s3) var(--s2); }
 }
 
