@@ -25,6 +25,13 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/* Атрибут hidden проигрывает любому авторскому display: у браузерного правила
+   `[hidden] { display: none }` та же специфичность, а авторские стили сильнее.
+   Поэтому элемент, спрятанный из JS, оставался на экране пустой плашкой, пока
+   у него был свой `display`. Подтверждаем явно и один раз на весь файл. */
+[hidden] { display: none !important; }
+
+
 body {
   margin: 0;
   background: var(--bg);
