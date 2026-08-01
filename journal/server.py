@@ -104,6 +104,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # Без явного запрета браузер кеширует статику по своему усмотрению, и
+        # после обновления кода приложение продолжает показывать старый
+        # интерфейс — молча и неотличимо от «правка не сработала». Сервер
+        # локальный, файлы мелкие, экономить тут нечего.
+        self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",

@@ -246,34 +246,51 @@ def pnl_histogram(conn: sqlite3.Connection, days: int = 0, buckets: int = 9, *,
 def top_trades(conn: sqlite3.Connection, days: int = 0, limit: int = 10, *,
                since: int | None = None, until: int | None = None,
                asset: str | None = None) -> dict:
-    """Топ прибыльных сделок: монета, направление, сколько взято.
+    """Топ прибыльных и топ убыточных сделок: монета, направление, сколько взято.
 
     Рядом отдаётся доля топа во всей валовой прибыли — концентрация результата
     в паре сделок сама по себе факт, который стоит видеть, а не выяснять.
+    Убыточные считаются тем же способом и отдельно: если весь минус за период
+    собрали три сделки, разговор идёт про эти три сделки, а не про систему.
     """
     rows = _closed(conn, days, since=since, until=until, asset=asset)
+
+    def payload(row):
+        return {
+            "trade_id": row["trade_id"],
+            "symbol": row["symbol"],
+            "direction": row["direction"],
+            "net_pnl": dec(row["net_pnl"]),
+            "closed_at": row["closed_at"],
+        }
+
     winners = sorted(
         (r for r in rows if dec(r["net_pnl"] or 0) > 0),
         key=lambda r: dec(r["net_pnl"]),
         reverse=True,
     )
+    losers = sorted(
+        (r for r in rows if dec(r["net_pnl"] or 0) < 0),
+        key=lambda r: dec(r["net_pnl"]),
+    )
+
     total_wins = sum(dec(r["net_pnl"]) for r in winners)
-    top = winners[:limit]
+    total_losses = sum(dec(r["net_pnl"]) for r in losers)
+    top, worst = winners[:limit], losers[:limit]
     top_sum = sum(dec(r["net_pnl"]) for r in top)
+    worst_sum = sum(dec(r["net_pnl"]) for r in worst)
+
     return {
-        "trades": [
-            {
-                "trade_id": r["trade_id"],
-                "symbol": r["symbol"],
-                "direction": r["direction"],
-                "net_pnl": dec(r["net_pnl"]),
-                "closed_at": r["closed_at"],
-            }
-            for r in top
-        ],
+        # Ключ `trades` оставлен прежним: по нему уже ходят бот и отчёт, и
+        # переименование ради симметрии сломало бы их без всякой выгоды.
+        "trades": [payload(r) for r in top],
+        "worst": [payload(r) for r in worst],
         "winners_total": len(winners),
+        "losers_total": len(losers),
         "top_sum": top_sum,
+        "worst_sum": worst_sum,
         "share_of_wins": (top_sum / total_wins) if total_wins else None,
+        "share_of_losses": (worst_sum / total_losses) if total_losses else None,
     }
 
 

@@ -204,6 +204,36 @@ class StatsTest(unittest.TestCase):
         self.assertLess(float(top["share_of_wins"]), 1.0,
                         "доля топа обязана честно показывать, что он не вся прибыль")
 
+    def test_top_trades_worst_only_losers_sorted(self):
+        self._trade("w1", "BTCUSDT", "100", "110")                # +10
+        self._trade("l1", "SOLUSDT", "100", "90", at=12 * HOUR)   # -10
+        self._trade("l2", "DOGEUSDT", "100", "70", at=14 * HOUR)  # -30
+        roundtrips.rebuild(self.conn)
+
+        top = stats.top_trades(self.conn, limit=10)
+        self.assertEqual([t["symbol"] for t in top["worst"]],
+                         ["DOGEUSDT", "SOLUSDT"],
+                         "прибыльные не попадают, худшая идёт первой")
+        self.assertEqual(top["losers_total"], 2)
+        self.assertEqual(float(top["share_of_losses"]), 1.0)
+
+    def test_top_trades_worst_share_is_partial_when_limited(self):
+        for i in range(4):
+            self._trade(f"L{i}", f"C{i}USDT", "100", str(90 - i * 10),
+                        at=(10 + 2 * i) * HOUR)
+        roundtrips.rebuild(self.conn)
+
+        top = stats.top_trades(self.conn, limit=2)
+        self.assertEqual(len(top["worst"]), 2)
+        self.assertLess(float(top["share_of_losses"]), 1.0,
+                        "два худших — не весь убыток, и доля обязана это показать")
+
+    def test_top_trades_share_is_none_without_trades(self):
+        top = stats.top_trades(self.conn)
+        self.assertIsNone(top["share_of_wins"])
+        self.assertIsNone(top["share_of_losses"],
+                          "пусто — значит неизвестно, а не ноль")
+
     def test_bootstrap_is_reproducible(self):
         from decimal import Decimal
         values = [Decimal(v) for v in (10, -5, 30, -40, 7, 22, -3)]
